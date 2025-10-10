@@ -217,4 +217,19 @@ If you encounter any issues or have questions:
 
 ---
 
+## 🔒 Security Testing
+
+This branch is being used to test the SecureDevOps AI Agent's security analysis capabilities.
+
+### Security Features Being Tested:
+- **Code Vulnerability Scanning**: Automated detection of security issues
+- **AI-Powered Analysis**: Intelligent security assessment using Claude AI
+- **Automatic Fix Suggestions**: AI-generated code improvements
+- **Real-time Security Feedback**: Immediate security insights on pull requests
+
+### Test Purpose:
+Demonstrating how AI can enhance security practices in educational technology projects.
+
+---
+
 Made with ❤️ for better learning experiences 
