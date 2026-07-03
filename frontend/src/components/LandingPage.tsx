@@ -2,13 +2,51 @@
 
 import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
-import { 
-  FileText, 
-  Brain, 
+import Grainient from '@/components/Grainient'
+import { FeatureAccordion, type AccordionFeature } from '@/components/FeatureAccordion'
+import {
+  FileText,
+  Layers,
   Target,
-  Upload
+  Upload,
+  ArrowRight,
+  ArrowUpRight,
+  Circle,
 } from 'lucide-react'
+
+const FEATURES: AccordionFeature[] = [
+  {
+    icon: Upload,
+    num: '01',
+    title: 'PDF Upload',
+    description: 'Import lecture slides or notes and convert them into study material instantly. Drag in any PDF and Bloom extracts the key concepts automatically.',
+    points: ['Drag & drop import', 'Automatic text extraction', 'Works with slides & scans'],
+  },
+  {
+    icon: Layers,
+    num: '02',
+    title: 'Flashcards',
+    description: 'Spaced-repetition cards, generated for you automatically from whatever material you upload.',
+    points: ['Auto-generated decks', 'Spaced repetition scheduling', 'Track mastery over time'],
+  },
+  {
+    icon: FileText,
+    num: '03',
+    title: 'Paste Text',
+    description: 'Drop in any text and generate a study set right away, no formatting or file upload required.',
+    points: ['Instant generation', 'No file required', 'Works with any subject'],
+  },
+  {
+    icon: Target,
+    num: '04',
+    title: 'Practice Tests',
+    description: 'Test yourself with questions built directly from your material, scored and timed like the real thing.',
+    points: ['Auto-graded scoring', 'Timed test mode', 'Built from your material'],
+  },
+]
+
+const LIME = 'text-[#D7FF3D]'
+const LIME_BG = 'bg-[#D7FF3D]'
 
 export default function LandingPage() {
   const router = useRouter()
@@ -18,269 +56,309 @@ export default function LandingPage() {
   }
 
   return (
-    <div className="min-h-screen bg-white">
+    <div className="min-h-screen relative">
+      {/* Persistent grainient background */}
+      <div className="fixed inset-0 z-0 h-screen w-screen bg-[#0d1230]">
+        <Grainient
+          timeSpeed={0.2}
+          colorBalance={0}
+          warpStrength={1}
+          warpFrequency={4}
+          warpSpeed={1.5}
+          warpAmplitude={55}
+          blendAngle={0}
+          blendSoftness={0.08}
+          rotationAmount={400}
+          noiseScale={1.6}
+          grainAmount={0.09}
+          grainScale={2}
+          grainAnimated={false}
+          contrast={1.35}
+          gamma={1}
+          saturation={1}
+          centerX={0}
+          centerY={0}
+          zoom={1.1}
+          color1="#0d1230"
+          color2="#6f93dd"
+          color3="#1a2568"
+        />
+      </div>
+
       {/* Header */}
-      <header className="border-b border-gray-200 bg-white">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center">
-              <div className="flex items-center space-x-2 cursor-pointer" onClick={() => router.push('/')}>
-                <span className="text-xl font-bold text-blue-600">QuizForge</span>
-              </div>
-            </div>
-            
-            <div className="flex items-center">
-              <Button 
-                onClick={handleNavigateToUpload}
-                className="bg-blue-600 hover:bg-blue-700 text-white"
-              >
-                Get Started
-              </Button>
-            </div>
+      <header className="relative z-10">
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="flex items-center h-20">
+            <button
+              onClick={() => router.push('/')}
+              className="text-xl font-semibold tracking-tight text-white font-sans"
+            >
+              Bloom
+            </button>
           </div>
         </div>
       </header>
 
-      {/* Hero Section */}
-      <section className="py-16 px-4 sm:px-6 lg:px-8">
-        <div className="max-w-6xl mx-auto text-center">
-          <h1 className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl font-bold mb-8 leading-tight">
-            <span className="text-gray-900">Don&apos;t just </span>
-            <span className="bg-gradient-to-r from-blue-600 via-purple-600 to-blue-800 bg-clip-text text-transparent">
-              read
-            </span>
-            <span className="text-gray-900">. </span>
-            <span className="bg-gradient-to-r from-blue-600 via-purple-600 to-blue-800 bg-clip-text text-transparent">
-              Remember.
-            </span>
-            {/* <span className="text-gray-900">.</span> */}
+      {/* Hero */}
+      <section className="relative z-10 max-w-7xl mx-auto px-6 pt-16 pb-32 grid lg:grid-cols-2 gap-16 items-center">
+        <div>
+          <h1 className="font-serif text-6xl sm:text-7xl lg:text-8xl font-light text-white leading-[1.05]">
+            Don&apos;t just read,
+            <br />
+            <span className={`italic font-normal ${LIME}`}>remember.</span>
           </h1>
-          <p className="text-lg sm:text-xl md:text-2xl text-gray-600 mb-8 max-w-4xl mx-auto leading-relaxed">
-            QuizForge turns dense study material into memory-boosting summaries and quizzes in seconds.
+          <p className="mt-8 text-xl text-white/70 max-w-md leading-relaxed font-sans font-light">
+            Smart study generation with AI. Upload material, generate quizzes, and retain more effortlessly.
           </p>
-        </div>
-      </section>
-
-      {/* Study Mode Cards */}
-      <section className="py-12 px-4 sm:px-6 lg:px-8">
-        <div className="max-w-6xl mx-auto">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-            {/* PDF Upload Card */}
-            <Card className="bg-gradient-to-br from-blue-600 to-blue-700 border-0 text-white hover:shadow-lg transition-shadow cursor-pointer" onClick={handleNavigateToUpload}>
-              <CardContent className="p-6">
-                <div className="mb-4">
-                  <Upload className="h-8 w-8" />
-                </div>
-                <h3 className="text-xl font-bold mb-2">PDF Upload</h3>
-                <div className="bg-white/20 rounded-lg p-4 mt-4">
-                  <div className="text-center">
-                    <FileText className="h-6 w-6 mx-auto mb-2 opacity-80" />
-                    <span className="text-xs">Upload & Convert</span>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Flashcards Card */}
-            <Card className="bg-gradient-to-br from-cyan-400 to-cyan-500 border-0 text-white hover:shadow-lg transition-shadow cursor-pointer" onClick={handleNavigateToUpload}>
-              <CardContent className="p-6">
-                <div className="mb-4">
-                  <Brain className="h-8 w-8" />
-                </div>
-                <h3 className="text-xl font-bold mb-2">Flashcards</h3>
-                <div className="bg-white/20 rounded-lg p-4 mt-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-sm">Study Cards</span>
-                    <div className="w-12 h-8 bg-white/30 rounded"></div>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Paste Text Card */}
-            <Card className="bg-gradient-to-br from-pink-400 to-pink-500 border-0 text-white hover:shadow-lg transition-shadow cursor-pointer" onClick={handleNavigateToUpload}>
-              <CardContent className="p-6">
-                <div className="mb-4">
-                  <FileText className="h-8 w-8" />
-                </div>
-                <h3 className="text-xl font-bold mb-2">Paste Text</h3>
-                <div className="bg-white/20 rounded-lg p-4 mt-4">
-                  <div className="mb-2">
-                    <span className="text-sm font-medium">Text Input</span>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    <span className="text-xs">Quick</span>
-                    <span className="text-xs border-b border-white/50">Generate</span>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Practice Tests Card */}
-            <Card className="bg-gradient-to-br from-orange-400 to-orange-500 border-0 text-white hover:shadow-lg transition-shadow cursor-pointer" onClick={handleNavigateToUpload}>
-              <CardContent className="p-6">
-                <div className="mb-4">
-                  <Target className="h-8 w-8" />
-                </div>
-                <h3 className="text-xl font-bold mb-2">Practice Tests</h3>
-                <div className="bg-white/20 rounded-lg p-4 mt-4">
-                  <div className="grid grid-cols-3 gap-2 text-xs">
-                    <div>Score: <span className="font-bold">84%</span></div>
-                    <div>Results: <span className="font-bold">76/90</span></div>
-                    <div>Time: <span className="font-bold">70m</span></div>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+          <div className="mt-10">
+            <Button
+              onClick={handleNavigateToUpload}
+              size="lg"
+              className="bg-white/10 border border-white/25 text-white hover:bg-white/20 rounded-xl px-6 h-14 font-medium text-base backdrop-blur-sm inline-flex items-center gap-3 font-sans"
+            >
+              <Upload className="h-5 w-5" />
+              Upload material
+            </Button>
           </div>
         </div>
-      </section>
 
-      {/* Ultimate Study App Section */}
-      <section className="py-16 px-4 sm:px-6 lg:px-8 bg-gray-50">
-        <div className="max-w-6xl mx-auto">
-          <div className="grid lg:grid-cols-2 gap-12 items-center">
-            <div>
-              <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-6">
-                Every class, every test, one ultimate study app
-              </h2>
-              <p className="text-lg text-gray-600 mb-8">
-                Create your own study materials or upload PDFs to generate AI-powered summaries and quizzes. Study them anytime, anywhere with our smart learning platform.
-              </p>
+        {/* Overlapping glass cards */}
+        <div className="relative h-[560px] hidden lg:block">
+          {/* Back card — Dashboard */}
+          <div
+            className="absolute top-0 left-0 w-[380px] rounded-3xl border border-white/20 bg-white/10 backdrop-blur-xl shadow-2xl p-7 font-sans"
+            style={{ transform: 'perspective(1200px) rotateY(-8deg) rotateX(3deg) rotate(-4deg)' }}
+          >
+            <div className="flex items-center gap-2 mb-6">
+              <span className={`h-2.5 w-2.5 rounded-full ${LIME_BG}`} />
+              <span className="text-white font-medium text-lg">Dashboard</span>
             </div>
-            <div className="bg-blue-600 rounded-2xl p-8 text-white">
-              <div className="bg-white rounded-lg p-4 mb-4">
-                <div className="flex items-center space-x-2 mb-3">
-                  <span className="text-lg">🌍</span>
-                  <span className="text-gray-700 text-sm">World map</span>
-                </div>
-                <div className="bg-gray-100 rounded p-3">
-                  <div className="text-gray-700 text-sm">South Africa</div>
-                  <div className="w-16 h-12 bg-green-200 rounded mt-2"></div>
-                </div>
+            <div className="rounded-2xl bg-gradient-to-br from-indigo-500/60 to-blue-600/40 p-5 mb-5">
+              <div className="text-white/90 text-sm font-medium mb-4">Study Progress</div>
+              <div className="flex items-end gap-2 h-20">
+                {[40, 55, 35, 70, 60, 90, 50].map((h, i) => (
+                  <div key={i} className="flex-1 bg-white/70 rounded-sm" style={{ height: `${h}%` }} />
+                ))}
               </div>
-              <div className="bg-white/10 rounded-lg p-2">
-                <span className="text-xs">Study suggestions</span>
+            </div>
+            <div className="grid grid-cols-2 gap-4 mb-5">
+              <div className="rounded-xl bg-white/10 border border-white/10 p-4">
+                <div className="text-white/50 text-xs">Sets Created</div>
+                <div className="text-white font-semibold text-2xl mt-0.5">18</div>
+              </div>
+              <div className="rounded-xl bg-white/10 border border-white/10 p-4">
+                <div className="text-white/50 text-xs">Cards</div>
+                <div className="text-white font-semibold text-2xl mt-0.5">312</div>
+              </div>
+            </div>
+            <div className="rounded-xl bg-white/10 border border-white/10 p-4">
+              <div className="text-white/60 text-xs font-medium mb-2.5">Recent Activity</div>
+              <div className="space-y-2 text-sm text-white/70">
+                <div className="flex items-center gap-2">
+                  <Circle className={`h-1.5 w-1.5 fill-current ${LIME}`} strokeWidth={0} />
+                  Biology quiz generated
+                </div>
+                <div className="flex items-center gap-2">
+                  <Circle className="h-1.5 w-1.5 fill-current text-blue-300" strokeWidth={0} />
+                  New flashcard set added
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      </section>
 
-      {/* PDF to Study Materials Section */}
-      <section className="py-16 px-4 sm:px-6 lg:px-8">
-        <div className="max-w-6xl mx-auto">
-          <div className="grid lg:grid-cols-2 gap-12 items-center">
-            <div className="bg-pink-500 rounded-2xl p-8 text-white">
-              <div className="bg-white rounded-lg p-6">
-                <div className="mb-4">
-                  <div className="text-pink-600 font-medium text-sm mb-2">📋 Study Guides</div>
-                  <h3 className="text-gray-900 font-bold text-lg">Biology 101</h3>
-                </div>
-                <div className="space-y-3">
-                  <div className="text-sm text-gray-700">
-                    <div className="font-medium">Key terms</div>
-                    <div className="text-xs text-gray-500 mt-1">Mitosis - a type of cell division that produces genetically identical</div>
-                  </div>
-                  <div className="text-sm text-gray-700">
-                    <div className="font-medium">Interphase</div>
-                    <div className="text-xs text-gray-500 mt-1">The cell prepares for mitosis by duplicating its DNA during</div>
-                  </div>
-                </div>
+          {/* Front card — Retention */}
+          <div
+            className="absolute top-40 left-48 w-[380px] rounded-3xl border border-white/20 bg-white/10 backdrop-blur-xl shadow-2xl p-7 font-sans"
+            style={{ transform: 'perspective(1200px) rotateY(6deg) rotateX(-2deg) rotate(3deg)' }}
+          >
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center gap-2">
+                <span className={`h-2.5 w-2.5 rounded-full ${LIME_BG}`} />
+                <span className="text-white font-medium text-lg">Retention</span>
+              </div>
+              <span className={`text-xs font-semibold ${LIME}`}>Live</span>
+            </div>
+            <div className="rounded-2xl bg-gradient-to-br from-emerald-500/30 to-lime-400/20 p-5 mb-5 flex items-center justify-between">
+              <div>
+                <div className="text-white/80 text-sm font-medium mb-1.5">Quiz Score</div>
+                <div className={`text-4xl font-semibold ${LIME}`}>92%</div>
+              </div>
+              <div className="relative h-20 w-20">
+                <svg viewBox="0 0 36 36" className="h-20 w-20 -rotate-90">
+                  <circle cx="18" cy="18" r="15.5" fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="3" />
+                  <circle cx="18" cy="18" r="15.5" fill="none" stroke="#D7FF3D" strokeWidth="3" strokeDasharray="97.4" strokeDashoffset="18" strokeLinecap="round" />
+                </svg>
               </div>
             </div>
-            <div>
-              <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-6">
-                Make class material instantly studiable
-              </h2>
-              <p className="text-lg text-gray-600 mb-8">
-                Turn your slides, videos, and notes into flashcard sets, practice tests, and study guides with AI.
-              </p>
-              <Button 
-                onClick={handleNavigateToUpload}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3"
-              >
-                Try it out
-              </Button>
+            <div className="space-y-3 mb-5 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-white/60">Cards mastered</span>
+                <span className="text-white font-semibold">231</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-white/60">Due today</span>
+                <span className="text-white font-semibold">14</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-white/60">Streak</span>
+                <span className={`font-semibold ${LIME}`}>9 days</span>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-xl bg-white/10 border border-white/10 py-3 text-center text-white text-sm font-medium">
+                Add Set
+              </div>
+              <div className={`rounded-xl ${LIME_BG} py-3 text-center text-black text-sm font-semibold`}>
+                Study
+              </div>
             </div>
           </div>
         </div>
       </section>
 
-      {/* Test Prep Section */}
-      <section className="py-16 px-4 sm:px-6 lg:px-8 bg-gray-50">
-        <div className="max-w-6xl mx-auto">
-          <div className="grid lg:grid-cols-2 gap-12 items-center">
-            <div>
-              <h2 className="text-3xl md:text-4xl font-bold text-gray-900 mb-6">
-                Test prep for any subject
-              </h2>
-              <p className="text-lg text-gray-600 mb-8">
-                Memorize anything with personalized practice tests and study sessions. 98% of students say QuizForge has improved their understanding.
-              </p>
-              <Button 
-                onClick={handleNavigateToUpload}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-8 py-3"
-              >
-                Get started
-              </Button>
+      {/* metric strip */}
+      <div className="relative z-10 max-w-7xl mx-auto px-6 pb-24 pt-12 font-sans">
+        <div className="relative border border-white/15 grid grid-cols-2 sm:grid-cols-4 divide-y divide-x-0 sm:divide-y-0 sm:divide-x divide-white/15">
+          {/* outer corners */}
+          <span className="absolute top-0 left-0 -translate-x-1/2 -translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
+          <span className="absolute top-0 right-0 translate-x-1/2 -translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
+          <span className="absolute bottom-0 left-0 -translate-x-1/2 translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
+          <span className="absolute bottom-0 right-0 translate-x-1/2 translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
+          {/* internal divider junctions (desktop: 1 row, 3 dividers) */}
+          <span className="hidden sm:block absolute top-0 left-1/4 -translate-x-1/2 -translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
+          <span className="hidden sm:block absolute bottom-0 left-1/4 -translate-x-1/2 translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
+          <span className="hidden sm:block absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
+          <span className="hidden sm:block absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
+          <span className="hidden sm:block absolute top-0 left-3/4 -translate-x-1/2 -translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
+          <span className="hidden sm:block absolute bottom-0 left-3/4 -translate-x-1/2 translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
+          {/* internal junctions (mobile: 2x2 grid — center cross + mid-edge points) */}
+          <span className="sm:hidden absolute top-1/2 left-0 -translate-x-1/2 -translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
+          <span className="sm:hidden absolute top-1/2 right-0 translate-x-1/2 -translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
+          <span className="sm:hidden absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
+          {[
+            ['98%', 'of students report better understanding'],
+            ['3 min', 'average time to generate a study set'],
+            ['4', 'study modes in one platform'],
+            ['312', 'flashcards generated per set on average'],
+          ].map(([stat, label]) => (
+            <div key={stat} className="p-6">
+              <div className="text-3xl sm:text-4xl font-semibold text-white">{stat}</div>
+              <div className="text-sm text-white/60 leading-relaxed mt-2">{label}</div>
             </div>
-            <div className="bg-cyan-400 rounded-2xl p-8">
-              <div className="bg-white rounded-lg p-6">
-                <div className="mb-4">
-                  <div className="flex items-center space-x-2 mb-4">
-                    <div className="w-6 h-6 bg-blue-100 rounded flex items-center justify-center">
-                      <span className="text-blue-600 text-xs">📚</span>
-                    </div>
-                    <span className="font-medium">Learn</span>
-                  </div>
-                  <div className="text-center mb-4">
-                    <h3 className="font-bold text-lg">Tree</h3>
-                    <div className="text-green-600 font-medium text-sm">Awesome!</div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div className="bg-gray-100 p-2 rounded">Tierra</div>
-                    <div className="bg-gray-100 p-2 rounded">Hoja</div>
-                    <div className="bg-gray-100 p-2 rounded">Raíz</div>
-                    <div className="bg-green-100 border-2 border-green-500 p-2 rounded">✓ Árbol</div>
-                  </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Feature list */}
+      <section className="relative z-10 px-6 py-28 font-sans">
+        <div className="max-w-5xl mx-auto">
+          <div className="max-w-xl mb-20">
+            <h2 className="font-serif text-4xl md:text-5xl font-light text-white mb-5 leading-tight">
+              Everything you need to <span className={`italic ${LIME}`}>actually</span> retain it
+            </h2>
+            <p className="text-lg text-white/60 leading-relaxed font-light">
+              Four ways to turn material into memory, all generated automatically.
+            </p>
+          </div>
+
+          <FeatureAccordion features={FEATURES} onSelect={handleNavigateToUpload} />
+        </div>
+      </section>
+
+      {/* Split showcase */}
+      <section className="relative z-10 px-6 py-28 border-t border-white/10 font-sans">
+        <div className="max-w-7xl mx-auto grid lg:grid-cols-2 gap-16 items-center">
+          <div>
+            <span className="text-xs font-medium uppercase tracking-wide text-white/40">Study guides</span>
+            <h2 className="font-serif text-4xl md:text-5xl font-light text-white mt-4 mb-6 leading-tight">
+              Make class material <span className={`italic ${LIME}`}>instantly</span> studiable
+            </h2>
+            <p className="text-lg text-white/60 mb-9 leading-relaxed max-w-md font-light">
+              Turn your slides, videos, and notes into flashcard sets, practice tests, and study guides with AI.
+            </p>
+            <Button
+              onClick={handleNavigateToUpload}
+              variant="outline"
+              className="rounded-full px-6 h-11 border-white/25 bg-transparent text-white hover:bg-white/10"
+            >
+              Try it out
+              <ArrowRight className="h-4 w-4" />
+            </Button>
+          </div>
+          <div className="rounded-3xl border border-white/15 bg-white/[0.06] backdrop-blur-xl p-8 font-sans">
+            <div className="flex items-center justify-between mb-6">
+              <span className="text-xs font-medium text-white/40 uppercase tracking-wide">
+                Study Guide
+              </span>
+              <span className={`text-xs font-medium ${LIME}`}>Generated in 3s</span>
+            </div>
+
+            <h4 className="font-serif text-2xl font-light text-white mb-6">Biology 101</h4>
+
+            <div className="space-y-4 mb-6">
+              <div className="rounded-xl bg-white/5 border border-white/10 p-4">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-sm font-medium text-white">Mitosis</span>
+                  <span className="text-[10px] font-medium text-white/40 uppercase tracking-wide">Key term</span>
                 </div>
+                <p className="text-sm text-white/50 leading-relaxed">
+                  A type of cell division that produces genetically identical daughter cells.
+                </p>
               </div>
-              <div className="bg-white/20 rounded-lg p-3 mt-4">
-                <div className="text-white text-xs">
-                  <div className="flex justify-between mb-2">
-                    <span>Multiple Choice</span>
-                    <span>🔘</span>
-                  </div>
-                  <div className="flex justify-between mb-2">
-                    <span>Written</span>
-                    <span>⚪</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Flashcards</span>
-                    <span>⚪</span>
-                  </div>
+              <div className="rounded-xl bg-white/5 border border-white/10 p-4">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-sm font-medium text-white">Interphase</span>
+                  <span className="text-[10px] font-medium text-white/40 uppercase tracking-wide">Key term</span>
                 </div>
+                <p className="text-sm text-white/50 leading-relaxed">
+                  The cell prepares for mitosis by duplicating its DNA.
+                </p>
               </div>
             </div>
+
+            <div className="rounded-xl bg-white/10 px-5 py-3.5 flex items-center justify-between">
+              <span className="text-xs font-medium text-white/80">12 more terms generated</span>
+              <ArrowUpRight className="h-3.5 w-3.5 text-white/60" />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* CTA banner */}
+      <section className="relative z-10 px-6 py-28">
+        <div className="max-w-7xl mx-auto">
+          <div className="rounded-3xl border border-white/15 bg-white/[0.06] backdrop-blur-xl px-8 py-20 sm:px-16 text-center relative overflow-hidden">
+            <div className={`absolute top-0 right-0 h-72 w-72 rounded-full ${LIME_BG} opacity-20 blur-3xl -translate-y-1/2 translate-x-1/3`} />
+            <h2 className="font-serif text-4xl md:text-6xl font-light text-white mb-6 relative">
+              Test prep for <span className={`italic ${LIME}`}>any</span> subject
+            </h2>
+            <p className="text-lg text-white/60 mb-11 max-w-xl mx-auto leading-relaxed relative font-sans font-light">
+              Memorize anything with personalized practice tests and study sessions. 98% of students say Bloom has improved their understanding.
+            </p>
+            <Button
+              onClick={handleNavigateToUpload}
+              size="lg"
+              className={`${LIME_BG} text-black hover:bg-[#c2e836] rounded-full px-7 h-12 font-medium text-base relative font-sans`}
+            >
+              Get started
+              <ArrowRight className="h-4 w-4" />
+            </Button>
           </div>
         </div>
       </section>
 
       {/* Footer */}
-      <footer className="bg-gray-900 text-white py-4">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
-          <div className="flex items-center justify-center space-x-2 mb-4">
-            <span className="text-xl font-bold">QuizForge</span>
-          </div>
-          <p className="text-gray-400 mb-2">
+      <footer className="relative z-10 border-t border-white/10 py-14 font-sans">
+        <div className="max-w-7xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="text-base font-medium text-white">Bloom</div>
+          <p className="text-sm text-white/50">
             AI-powered learning platform for the modern student
           </p>
-          <p className="text-sm text-gray-500">
-            © 2025 QuizForge. All rights reserved.
+          <p className="text-xs text-white/30">
+            © 2026 Bloom. All rights reserved.
           </p>
         </div>
       </footer>
     </div>
   )
-} 
+}

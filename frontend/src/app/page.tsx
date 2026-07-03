@@ -2,6 +2,6 @@
 
 import LandingPage from '@/components/LandingPage'
 
-export default function QuizForge() {
+export default function Bloom() {
   return <LandingPage />
 }

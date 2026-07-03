@@ -1,10 +1,10 @@
-# 🚀 QuizForge
+# 🚀 Bloom
 
 **Don't just read. Remember.**
 
 An AI-powered educational tool that transforms your study materials into interactive quizzes, comprehensive summaries, and engaging flashcards using cutting-edge AI technology.
 
-![QuizForge Demo](https://img.shields.io/badge/Demo-Live-green) ![FastAPI](https://img.shields.io/badge/FastAPI-Backend-blue) ![Next.js](https://img.shields.io/badge/Next.js-Frontend-black) ![AI Powered](https://img.shields.io/badge/AI-Powered-purple)
+![Bloom Demo](https://img.shields.io/badge/Demo-Live-green) ![FastAPI](https://img.shields.io/badge/FastAPI-Backend-blue) ![Next.js](https://img.shields.io/badge/Next.js-Frontend-black) ![AI Powered](https://img.shields.io/badge/AI-Powered-purple)
 
 ## ✨ Features
 
@@ -58,8 +58,8 @@ An AI-powered educational tool that transforms your study materials into interac
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/quizforge.git
-   cd quizforge
+   git clone https://github.com/yourusername/bloom.git
+   cd bloom
    ```
 
 2. **Set up the Backend**
@@ -150,7 +150,7 @@ response = requests.post('http://localhost:8000/generate-quiz', json=quiz_data)
 ## 🏗️ Project Structure
 
 ```
-quizforge/
+bloom/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py          # FastAPI application
@@ -212,8 +212,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 📞 Support
 
 If you encounter any issues or have questions:
-- Create an [Issue](https://github.com/yourusername/quizforge/issues)
-- Check the [Documentation](https://github.com/yourusername/quizforge/wiki)
+- Create an [Issue](https://github.com/yourusername/bloom/issues)
+- Check the [Documentation](https://github.com/yourusername/bloom/wiki)
 
 ---
 

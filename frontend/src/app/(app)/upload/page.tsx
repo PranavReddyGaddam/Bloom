@@ -2,13 +2,13 @@
 
 import { useSearchParams } from 'next/navigation'
 import { Suspense } from 'react'
-import QuizForgeApp from '@/components/QuizForgeApp'
+import BloomApp from '@/components/BloomApp'
 
 function UploadContent() {
   const searchParams = useSearchParams()
   const step = searchParams.get('step') || 'upload'
-  
-  return <QuizForgeApp initialStep={step as 'upload' | 'configure' | 'results'} />
+
+  return <BloomApp initialStep={step as 'upload' | 'configure' | 'results'} />
 }
 
 export default function UploadPage() {

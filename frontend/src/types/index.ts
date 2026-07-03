@@ -3,6 +3,8 @@ export interface QuizQuestion {
   options: string[];
   correct_answer: string;
   explanation?: string;
+  category?: string;
+  difficulty?: string;
 }
 
 export interface SummaryResponse {
@@ -27,6 +29,87 @@ export interface QuizResult {
   feedback: string;
   suggestion: string;
   passed: boolean;
+  attempt_id?: string;
+}
+
+export interface BreakdownEntry {
+  label: string;
+  correct: number;
+  total: number;
+}
+
+export interface AttemptBreakdown {
+  by_category: BreakdownEntry[];
+  by_difficulty: BreakdownEntry[];
+}
+
+export interface RecentAttempt {
+  id: string;
+  subject: string;
+  difficulty: string;
+  score: number;
+  total_questions: number;
+  created_at: string;
+}
+
+export interface UserStats {
+  total_attempts: number;
+  average_score: number;
+  best_category: string | null;
+  recent_attempts: RecentAttempt[];
+}
+
+export interface ScoreTrendPoint {
+  attempt_id: string;
+  subject: string;
+  score: number;
+  created_at: string;
+}
+
+export interface AccuracyEntry {
+  label: string;
+  correct: number;
+  total: number;
+  accuracy: number;
+}
+
+export interface SubjectCount {
+  label: string;
+  count: number;
+}
+
+export interface UserAnalytics {
+  score_trend: ScoreTrendPoint[];
+  by_category: AccuracyEntry[];
+  by_difficulty: AccuracyEntry[];
+  by_subject: SubjectCount[];
+  by_subject_accuracy: AccuracyEntry[];
+}
+
+export interface Subject {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
+export interface RecapQuestion {
+  question_text: string;
+  category?: string;
+  difficulty?: string;
+  user_answer: string;
+  correct_answer: string;
+  is_correct: boolean;
+  question_index: number;
+}
+
+export interface AttemptRecap {
+  id: string;
+  subject: string;
+  difficulty: string;
+  score: number;
+  total_questions: number;
+  created_at: string;
+  questions: RecapQuestion[];
 }
 
 export interface PDFUploadResponse {
@@ -45,6 +128,18 @@ export interface QuizFormData {
   summaryType: SummaryType;
 }
 
+export type CardType = 'definition' | 'concept' | 'fact' | 'mixed';
+
+export interface StudyFormData {
+  numQuestions: number;
+  numCards: number;
+  subjectId: string | null;
+  subjectName: string;
+  difficulty: Difficulty;
+  summaryType: SummaryType;
+  cardType: CardType;
+}
+
 export interface UserAnswer {
   questionIndex: number;
   selectedOption: string;
@@ -61,6 +156,4 @@ export interface FlashcardResponse {
   total_cards: number;
   subject: string;
   card_type: string;
-}
-
-export type CardType = 'definition' | 'concept' | 'fact' | 'mixed'; 
+} 

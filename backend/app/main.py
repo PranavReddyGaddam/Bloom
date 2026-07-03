@@ -1,20 +1,24 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import os
 import json
 from typing import Optional, List
 from pydantic import BaseModel
-import fitz  # PyMuPDF
+import docx
+from pptx import Presentation
 from dotenv import load_dotenv
 
-from .ai_service import QuizForgeAI
-from .models import SummaryRequest, QuizRequest, QuizResponse, SummaryResponse, FlashcardRequest, FlashcardResponse
+from .ai_service import BloomAI
+from .models import SummaryRequest, QuizRequest, QuizResponse, SummaryResponse, FlashcardRequest, FlashcardResponse, AnswerCheckRequest, AnswerCheckResponse, AttemptBreakdownResponse, UserStatsResponse, UserAnalyticsResponse, AttemptRecapResponse, RecentAttempt, Subject, CreateSubjectRequest
+from . import extraction_agent
+from . import db
+from . import auth
 
 # Load environment variables
 load_dotenv()
 
-app = FastAPI(title="QuizForge API", version="1.0.0")
+app = FastAPI(title="Bloom API", version="1.0.0")
 
 # Add CORS middleware
 app.add_middleware(
@@ -26,52 +30,61 @@ app.add_middleware(
 )
 
 # Initialize AI service
-ai_service = QuizForgeAI()
+ai_service = BloomAI()
 
 @app.get("/")
 async def root():
-    return {"message": "QuizForge API is running!"}
+    return {"message": "Bloom API is running!"}
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "QuizForge API"}
+    return {"status": "healthy", "service": "Bloom API"}
+
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".pptx"}
 
 @app.post("/upload-pdf")
-async def upload_pdf(file: UploadFile = File(...)):
-    """Upload and extract text from PDF"""
-    if not file.filename.endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="Only PDF files are allowed")
-    
+async def upload_pdf(file: UploadFile = File(...), user_id: str = Depends(auth.get_current_user_id)):
+    """Upload and extract text from a PDF, DOCX, or PPTX file"""
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Only PDF, DOCX, and PPTX files are allowed")
+
     try:
         # Save uploaded file temporarily
         upload_dir = "uploads"
         os.makedirs(upload_dir, exist_ok=True)
         file_path = os.path.join(upload_dir, file.filename)
-        
+
         with open(file_path, "wb") as buffer:
             content = await file.read()
             buffer.write(content)
-        
-        # Extract text from PDF
-        text_content = extract_text_from_pdf(file_path)
-        
+
+        # Extract text based on file type
+        if ext == ".pdf":
+            text_content = await extraction_agent.extract_structured(file_path)
+        elif ext == ".docx":
+            text_content = extract_text_from_docx(file_path)
+        else:
+            text_content = extract_text_from_pptx(file_path)
+
         # Clean up temporary file
         os.remove(file_path)
-        
+
         return {
             "filename": file.filename,
             "text_content": text_content,
             "word_count": len(text_content.split())
         }
-    
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
 
 @app.post("/generate-summary", response_model=SummaryResponse)
 async def generate_summary(
     text_content: str = Form(...),
     summary_type: str = Form(...),  # "short", "bullet_points", "detailed"
-    subject: Optional[str] = Form(None)
+    subject: Optional[str] = Form(None),
+    user_id: str = Depends(auth.get_current_user_id)
 ):
     """Generate summary from text content"""
     try:
@@ -80,12 +93,23 @@ async def generate_summary(
             summary_type=summary_type,
             subject=subject
         )
-        
+
+        if summary_type == "bullet_points" and "concepts" in summary:
+            summary_text = json.dumps({"concepts": summary["concepts"]})
+            word_count = sum(
+                len(c.get("title", "").split()) + len(c.get("explanation", "").split()) +
+                sum(len(d.split()) for d in c.get("details", []))
+                for c in summary["concepts"]
+            )
+        else:
+            summary_text = summary["content"]
+            word_count = len(summary["content"].split())
+
         return SummaryResponse(
-            summary=summary["content"],
+            summary=summary_text,
             tags=summary.get("tags", []),
             summary_type=summary_type,
-            word_count=len(summary["content"].split())
+            word_count=word_count
         )
     
     except Exception as e:
@@ -97,7 +121,8 @@ async def generate_quiz(
     num_questions: int = Form(...),
     subject: str = Form(...),
     difficulty: str = Form(...),  # "easy", "medium", "hard"
-    previous_score: Optional[int] = Form(None)
+    previous_score: Optional[int] = Form(None),
+    user_id: str = Depends(auth.get_current_user_id)
 ):
     """Generate quiz from text content with adaptive difficulty"""
     try:
@@ -132,7 +157,8 @@ async def generate_flashcards(
     text_content: str = Form(...),
     num_cards: int = Form(...),
     subject: str = Form(...),
-    card_type: str = Form(...)  # "definition", "concept", "fact", "mixed"
+    card_type: str = Form(...),  # "definition", "concept", "fact", "mixed"
+    user_id: str = Depends(auth.get_current_user_id)
 ):
     """Generate flashcards from text content"""
     try:
@@ -153,63 +179,145 @@ async def generate_flashcards(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating flashcards: {str(e)}")
 
-@app.post("/check-answers")
-async def check_answers(
-    user_answers: List[str] = Form(...),
-    correct_answers: List[str] = Form(...)
-):
-    """Check user answers and provide score"""
+@app.post("/subjects", response_model=Subject)
+async def create_subject(request: CreateSubjectRequest, external_user_id: str = Depends(auth.get_current_user_id)):
+    """Create a subject/project for the signed-in user, or return the
+    existing one if a subject with this name already exists"""
     try:
-        if len(user_answers) != len(correct_answers):
+        if not request.name.strip():
+            raise HTTPException(status_code=400, detail="Subject name cannot be empty")
+        subject = db.create_subject(external_user_id, request.name)
+        return Subject(**subject)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating subject: {str(e)}")
+
+@app.get("/subjects", response_model=List[Subject])
+async def get_subjects(external_user_id: str = Depends(auth.get_current_user_id)):
+    """List all subjects owned by the signed-in user"""
+    try:
+        subjects = db.list_subjects(external_user_id)
+        return [Subject(**s) for s in subjects]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching subjects: {str(e)}")
+
+@app.delete("/subjects/{subject_id}")
+async def delete_subject(subject_id: str, external_user_id: str = Depends(auth.get_current_user_id)):
+    """Delete a subject owned by the signed-in user. Past attempts that
+    referenced it survive and fall into 'Uncategorized' in subject-grouped
+    views (ON DELETE SET NULL on quiz_attempts.subject_id)."""
+    try:
+        deleted = db.delete_subject(subject_id, external_user_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Subject not found")
+        return {"deleted": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting subject: {str(e)}")
+
+@app.post("/check-answers", response_model=AnswerCheckResponse)
+async def check_answers(request: AnswerCheckRequest, external_user_id: str = Depends(auth.get_current_user_id)):
+    """Check user answers, score the quiz, and persist the attempt"""
+    try:
+        if len(request.questions) != len(request.user_answers):
             raise HTTPException(status_code=400, detail="Answer count mismatch")
-        
-        correct_count = sum(1 for user, correct in zip(user_answers, correct_answers) 
-                          if user.strip().lower() == correct.strip().lower())
-        
-        total_questions = len(correct_answers)
-        score = (correct_count / total_questions) * 100
-        
-        # Generate performance feedback
-        if score >= 90:
-            feedback = "Excellent work! You've mastered this material."
-            suggestion = "Consider trying a harder difficulty level."
-        elif score >= 70:
-            feedback = "Good job! You have a solid understanding."
-            suggestion = "Review the areas you missed and try again."
-        elif score >= 50:
-            feedback = "You're getting there! Keep studying."
-            suggestion = "Consider reviewing the material again or trying an easier difficulty."
-        else:
-            feedback = "Don't worry, this is part of learning!"
-            suggestion = "Try reviewing the summary again and attempt an easier quiz."
-        
-        return {
-            "score": score,
-            "correct_answers": correct_count,
-            "total_questions": total_questions,
-            "feedback": feedback,
-            "suggestion": suggestion,
-            "passed": score >= 60
-        }
-    
+
+        user_id = db.get_or_create_user(external_user_id)
+
+        result = db.record_quiz_attempt(
+            subject_id=request.subject_id,
+            difficulty=request.difficulty,
+            questions=request.questions,
+            user_answers=request.user_answers,
+            user_id=user_id,
+        )
+
+        return AnswerCheckResponse(**result)
+
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error checking answers: {str(e)}")
 
-def extract_text_from_pdf(file_path: str) -> str:
-    """Extract text content from PDF file"""
+@app.get("/quiz-attempts/{attempt_id}/breakdown", response_model=AttemptBreakdownResponse)
+async def get_attempt_breakdown(attempt_id: str, user_id: str = Depends(auth.get_current_user_id)):
+    """Real per-category and per-difficulty performance for a single completed attempt"""
     try:
-        doc = fitz.open(file_path)
-        text_content = ""
-        
-        for page_num in range(doc.page_count):
-            page = doc.load_page(page_num)
-            text_content += page.get_text()
-        
-        doc.close()
-        return text_content.strip()
-    
+        breakdown = db.get_attempt_breakdown(attempt_id)
+        return AttemptBreakdownResponse(**breakdown)
     except Exception as e:
-        raise Exception(f"Error extracting text from PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching breakdown: {str(e)}")
+
+@app.get("/me/stats", response_model=UserStatsResponse)
+async def get_my_stats(external_user_id: str = Depends(auth.get_current_user_id)):
+    """Aggregate quiz-history stats for the signed-in user, for the profile screen"""
+    try:
+        stats = db.get_user_stats(external_user_id)
+        return UserStatsResponse(**stats)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching stats: {str(e)}")
+
+@app.get("/me/analytics", response_model=UserAnalyticsResponse)
+async def get_my_analytics(external_user_id: str = Depends(auth.get_current_user_id)):
+    """Chart-ready datasets for the signed-in user: score trend, accuracy
+    by category/difficulty, and quiz distribution by subject"""
+    try:
+        analytics = db.get_user_analytics(external_user_id)
+        return UserAnalyticsResponse(**analytics)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching analytics: {str(e)}")
+
+@app.get("/me/recent-attempts", response_model=List[RecentAttempt])
+async def get_my_recent_attempts(external_user_id: str = Depends(auth.get_current_user_id)):
+    """Lightweight recent-attempts list for the sidebar"""
+    try:
+        attempts = db.get_recent_attempts(external_user_id)
+        return [RecentAttempt(**a) for a in attempts]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching recent attempts: {str(e)}")
+
+@app.get("/quiz-attempts/{attempt_id}/recap", response_model=AttemptRecapResponse)
+async def get_attempt_recap(attempt_id: str, external_user_id: str = Depends(auth.get_current_user_id)):
+    """Full read-only recap of a past attempt, scoped to the requesting user"""
+    recap = db.get_attempt_recap(attempt_id, external_user_id)
+    if recap is None:
+        raise HTTPException(status_code=404, detail="Attempt not found")
+    return AttemptRecapResponse(**recap)
+
+def extract_text_from_docx(file_path: str) -> str:
+    """Extract text content from a DOCX file"""
+    try:
+        document = docx.Document(file_path)
+        parts = [paragraph.text for paragraph in document.paragraphs if paragraph.text]
+
+        for table in document.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    if cell.text:
+                        parts.append(cell.text)
+
+        return "\n".join(parts).strip()
+
+    except Exception as e:
+        raise Exception(f"Error extracting text from DOCX: {str(e)}")
+
+def extract_text_from_pptx(file_path: str) -> str:
+    """Extract text content from a PPTX file"""
+    try:
+        presentation = Presentation(file_path)
+        parts = []
+
+        for slide in presentation.slides:
+            for shape in slide.shapes:
+                if shape.has_text_frame and shape.text_frame.text:
+                    parts.append(shape.text_frame.text)
+
+        return "\n".join(parts).strip()
+
+    except Exception as e:
+        raise Exception(f"Error extracting text from PPTX: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

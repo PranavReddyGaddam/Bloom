@@ -110,3 +110,12 @@ uploads/
 # Cache directories
 .cache/
 .parcel-cache/ 
+
+
+# Plan files (implementation plans, not part of the app)
+ARCHITECTURE_*.md
+
+# Claude Code local config
+.claude/
+.mcp.json
+**/.mcp.json

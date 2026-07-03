@@ -1,13 +1,21 @@
-import { 
-  PDFUploadResponse, 
-  SummaryResponse, 
-  QuizResponse, 
-  QuizResult, 
-  SummaryType, 
+import {
+  PDFUploadResponse,
+  SummaryResponse,
+  QuizResponse,
+  QuizResult,
+  QuizQuestion,
+  SummaryType,
   Difficulty,
   FlashcardResponse,
-  CardType
+  CardType,
+  AttemptBreakdown,
+  UserStats,
+  UserAnalytics,
+  RecentAttempt,
+  AttemptRecap,
+  Subject
 } from '@/types';
+import { createClient } from '@/lib/supabase/client';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -18,6 +26,12 @@ class APIError extends Error {
   }
 }
 
+async function authHeaders(): Promise<Record<string, string>> {
+  const supabase = createClient();
+  const { data: { session } } = await supabase.auth.getSession();
+  return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {};
+}
+
 export const api = {
   async uploadPDF(file: File): Promise<PDFUploadResponse> {
     const formData = new FormData();
@@ -25,6 +39,7 @@ export const api = {
 
     const response = await fetch(`${API_BASE_URL}/upload-pdf`, {
       method: 'POST',
+      headers: await authHeaders(),
       body: formData,
     });
 
@@ -50,6 +65,7 @@ export const api = {
 
     const response = await fetch(`${API_BASE_URL}/generate-summary`, {
       method: 'POST',
+      headers: await authHeaders(),
       body: formData,
     });
 
@@ -79,6 +95,7 @@ export const api = {
 
     const response = await fetch(`${API_BASE_URL}/generate-quiz`, {
       method: 'POST',
+      headers: await authHeaders(),
       body: formData,
     });
 
@@ -91,20 +108,20 @@ export const api = {
   },
 
   async checkAnswers(
+    questions: QuizQuestion[],
     userAnswers: string[],
-    correctAnswers: string[]
+    subjectId: string,
+    difficulty: Difficulty
   ): Promise<QuizResult> {
-    const formData = new FormData();
-    userAnswers.forEach((answer) => {
-      formData.append('user_answers', answer);
-    });
-    correctAnswers.forEach((answer) => {
-      formData.append('correct_answers', answer);
-    });
-
     const response = await fetch(`${API_BASE_URL}/check-answers`, {
       method: 'POST',
-      body: formData,
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+      body: JSON.stringify({
+        questions,
+        user_answers: userAnswers,
+        subject_id: subjectId,
+        difficulty,
+      }),
     });
 
     if (!response.ok) {
@@ -115,9 +132,114 @@ export const api = {
     return response.json();
   },
 
+  async getAttemptBreakdown(attemptId: string): Promise<AttemptBreakdown> {
+    const response = await fetch(`${API_BASE_URL}/quiz-attempts/${attemptId}/breakdown`, {
+      headers: await authHeaders(),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to fetch breakdown: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  async getMyStats(): Promise<UserStats> {
+    const response = await fetch(`${API_BASE_URL}/me/stats`, {
+      headers: await authHeaders(),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to fetch stats: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  async getMyAnalytics(): Promise<UserAnalytics> {
+    const response = await fetch(`${API_BASE_URL}/me/analytics`, {
+      headers: await authHeaders(),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to fetch analytics: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  async getMyRecentAttempts(): Promise<RecentAttempt[]> {
+    const response = await fetch(`${API_BASE_URL}/me/recent-attempts`, {
+      headers: await authHeaders(),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to fetch recent attempts: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  async getAttemptRecap(attemptId: string): Promise<AttemptRecap> {
+    const response = await fetch(`${API_BASE_URL}/quiz-attempts/${attemptId}/recap`, {
+      headers: await authHeaders(),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to fetch attempt recap: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  async getSubjects(): Promise<Subject[]> {
+    const response = await fetch(`${API_BASE_URL}/subjects`, {
+      headers: await authHeaders(),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to fetch subjects: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  async createSubject(name: string): Promise<Subject> {
+    const response = await fetch(`${API_BASE_URL}/subjects`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+      body: JSON.stringify({ name }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to create subject: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  async deleteSubject(subjectId: string): Promise<void> {
+    const response = await fetch(`${API_BASE_URL}/subjects/${subjectId}`, {
+      method: 'DELETE',
+      headers: await authHeaders(),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to delete subject: ${error}`, response.status);
+    }
+  },
+
   async healthCheck(): Promise<{ status: string; service: string }> {
     const response = await fetch(`${API_BASE_URL}/health`);
-    
+
     if (!response.ok) {
       throw new APIError('Health check failed', response.status);
     }
@@ -139,6 +261,7 @@ export const api = {
 
     const response = await fetch(`${API_BASE_URL}/generate-flashcards`, {
       method: 'POST',
+      headers: await authHeaders(),
       body: formData,
     });
 
@@ -151,4 +274,4 @@ export const api = {
   }
 };
 
-export { APIError }; 
+export { APIError };
