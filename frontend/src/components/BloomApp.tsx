@@ -11,11 +11,13 @@ import {
   FlashcardResponse,
   StudyFormData,
   Difficulty,
-  SimilarDocument
+  SimilarDocument,
+  TutorStartResponse
 } from '@/types'
 import { UploadStep } from '@/components/study/UploadStep'
 import { ConfigureStep } from '@/components/study/ConfigureStep'
 import { ResultsStep } from '@/components/study/ResultsStep'
+import { TutorView } from '@/components/study/TutorView'
 
 interface BloomAppProps {
   initialStep?: 'upload' | 'configure' | 'results'
@@ -59,7 +61,8 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
   const [flashcards, setFlashcards] = useState<FlashcardResponse | null>(null)
   const [quizResult, setQuizResult] = useState<QuizResult | null>(null)
   const [userAnswers, setUserAnswers] = useState<UserAnswer[]>([])
-  const [currentStep, setCurrentStep] = useState<'upload' | 'configure' | 'results'>(initialStep)
+  const [currentStep, setCurrentStep] = useState<'upload' | 'configure' | 'results' | 'tutor'>(initialStep)
+  const [tutorSession, setTutorSession] = useState<TutorStartResponse | null>(null)
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
 
   // Form data
@@ -163,6 +166,29 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     }
   }, [textContent, formData])
 
+  const handleStartTutor = useCallback(async () => {
+    if (!textContent || !formData.subjectName) {
+      return
+    }
+
+    setLoading(true)
+    setError('')
+
+    try {
+      const session = await api.startTutorSession(
+        textContent,
+        formData.subjectName,
+        formData.numQuestions
+      )
+      setTutorSession(session)
+      setCurrentStep('tutor')
+    } catch (err) {
+      setError(err instanceof APIError ? err.message : 'Failed to start tutor session')
+    } finally {
+      setLoading(false)
+    }
+  }, [textContent, formData])
+
   const handleAnswerSelect = useCallback((questionIndex: number, selectedOption: string) => {
     setUserAnswers(prev => {
       const updated = prev.filter(a => a.questionIndex !== questionIndex)
@@ -210,6 +236,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     setFlashcards(null)
     setQuizResult(null)
     setUserAnswers([])
+    setTutorSession(null)
     setCurrentStep('upload')
     setError('')
 
@@ -240,9 +267,31 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
         flashcards={flashcards}
         handleGenerate={handleGenerate}
         handleGenerateFlashcards={handleGenerateFlashcards}
+        handleStartTutor={handleStartTutor}
         setCurrentStep={setCurrentStep}
         resetApp={resetApp}
       />
+    )
+  } else if (currentStep === 'tutor' && tutorSession) {
+    return (
+      <main className="relative z-10 max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+        <div className="text-center mb-10">
+          <h1 className="font-serif text-4xl sm:text-5xl font-light text-white mb-4">
+            Tutor <span className="italic text-[#D7FF3D]">session</span>
+          </h1>
+          <p className="text-lg text-white/60 font-sans font-light">
+            {formData.subjectName} — one question at a time, adapting to you
+          </p>
+        </div>
+        <TutorView
+          session={tutorSession}
+          onExit={() => {
+            setTutorSession(null)
+            setCurrentStep('configure')
+          }}
+          resetApp={resetApp}
+        />
+      </main>
     )
   } else {
     return (

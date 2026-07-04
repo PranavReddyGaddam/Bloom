@@ -1,220 +1,271 @@
-# 🚀 Bloom
+# Bloom
 
-**Don't just read. Remember.**
+Bloom is an AI-powered study platform that turns uploaded course material into summaries, flashcards, practice quizzes, and adaptive one-on-one tutoring sessions. It is built around an agentic backend: every generation step is a multi-stage pipeline with self-verification rather than a single LLM call.
 
-An AI-powered educational tool that transforms your study materials into interactive quizzes, comprehensive summaries, and engaging flashcards using cutting-edge AI technology.
+## Features
 
-![Bloom Demo](https://img.shields.io/badge/Demo-Live-green) ![FastAPI](https://img.shields.io/badge/FastAPI-Backend-blue) ![Next.js](https://img.shields.io/badge/Next.js-Frontend-black) ![AI Powered](https://img.shields.io/badge/AI-Powered-purple)
+### Study tools
 
-## ✨ Features
+- Document upload with support for PDF, DOCX, and PPTX files
+- Concept-grouped, bullet-point, short, and detailed summaries
+- Interactive flashcards (definitions, concepts, facts, or mixed)
+- Multiple-choice practice quizzes with per-question explanations
+- Adaptive tutor sessions that select each next question live, based on a per-concept model of what the student understands
+- Cross-upload memory that recognizes when new material overlaps documents the user has already studied
 
-### 🧠 **AI-Powered Study Tools**
-- **PDF Upload & Processing**: Extract text from PDF documents automatically
-- **Smart Summarization**: Generate bullet points, detailed summaries, or concise overviews
-- **Interactive Quizzes**: Create multiple-choice questions with explanations
-- **Flashcard Generation**: Build interactive flashcards with flip animations
-- **Paste Text Support**: Work with any text content directly
+### Analytics and persistence
 
-### 📊 **Professional Quiz Interface**
-- **Medical-Style Quiz Layout**: Single question display with progress tracking
-- **Comprehensive Analytics**: Performance dashboards with detailed feedback
-- **AI Grading System**: Intelligent feedback based on performance levels
-- **Question Review**: Detailed breakdown of correct/incorrect answers with explanations
+- User accounts via Supabase Auth; all data is scoped per user
+- Persistent quiz history with per-question records
+- Performance breakdowns by category, difficulty, and subject
+- Score trends and profile statistics across all attempts
 
-### 🎨 **Modern UI/UX**
-- **Responsive Design**: Works seamlessly on desktop and mobile
-- **Tabbed Interface**: Easy navigation between different study modes
-- **Real-time Progress**: Visual indicators and completion tracking
-- **Interactive Elements**: Hover effects, animations, and smooth transitions
+## Architecture
 
-## 🛠️ Tech Stack
+The backend is organized as a set of agents rather than one-shot prompt calls. Each stage fails open: any verification step that errors out degrades gracefully instead of blocking the user.
 
-### Backend
-- **FastAPI**: High-performance Python web framework
-- **OpenRouter API**: AI model integration with Qwen 3-32B from Cerebras
-- **PyPDF2**: PDF text extraction
-- **Uvicorn**: ASGI server for production deployment
+```mermaid
+flowchart LR
+    U[User] --> FE[Next.js Frontend]
+    FE --> API[FastAPI Backend]
 
-### Frontend
-- **Next.js 15**: React framework with Turbopack
-- **TypeScript**: Type-safe development
-- **Tailwind CSS**: Utility-first CSS framework
-- **Lucide React**: Modern icon library
-- **Custom UI Components**: Reusable component library
+    API --> EXTRACT[Extraction Agent<br/>page classification + vision]
+    API --> SYNTH[Synthesis Agent<br/>draft, critique, revise]
+    API --> QUIZ[Quiz Agent<br/>generate, ground-check, regenerate]
+    API --> TUTOR[Tutor Agent<br/>live adaptive loop]
+    API --> MEMSVC[Memory Service<br/>cross-upload overlap detection]
 
-### AI Integration
-- **Model**: Qwen 3-32B via Cerebras through OpenRouter
-- **Capabilities**: Text analysis, question generation, summarization
+    EXTRACT -.->|page images| VISION[(Vision-capable LLM)]
+    SYNTH -.-> LLM[(LLM via OpenRouter)]
+    QUIZ -.-> LLM
+    TUTOR -.-> LLM
+    MEMSVC -.->|local embeddings| VDB[(Supabase pgvector)]
 
-## 🚀 Getting Started
-
-### Prerequisites
-- **Node.js** (v18 or higher)
-- **Python** (v3.8 or higher)
-- **npm** or **yarn**
-- **OpenRouter API Key**
-
-### Installation
-
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/yourusername/bloom.git
-   cd bloom
-   ```
-
-2. **Set up the Backend**
-   ```bash
-   cd backend
-   pip install -r requirements.txt
-   ```
-
-3. **Configure Environment Variables**
-   Create a `.env` file in the backend directory:
-   ```env
-   OPENROUTER_API_KEY=your_openrouter_api_key_here
-   ```
-
-4. **Set up the Frontend**
-   ```bash
-   cd ../frontend
-   npm install
-   ```
-
-5. **Start the Development Servers**
-   
-   **Backend (Terminal 1):**
-   ```bash
-   cd backend
-   python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-   ```
-   
-   **Frontend (Terminal 2):**
-   ```bash
-   cd frontend
-   npm run dev
-   ```
-
-6. **Access the Application**
-   - Frontend: http://localhost:3000 (or next available port)
-   - Backend API: http://localhost:8000
-   - API Documentation: http://localhost:8000/docs
-
-## 🎯 Usage
-
-### 1. **Generate Practice Tests**
-- Upload PDF files or paste text content
-- Configure quiz settings (difficulty, number of questions, subject)
-- Take interactive quizzes with real-time feedback
-- Review detailed performance analytics
-
-### 2. **Create Flashcard Sets**
-- Choose between PDF upload or text input
-- Select card types (definitions, concepts, facts, mixed)
-- Study with interactive flip cards
-- Track learning progress
-
-### 3. **Generate Summaries**
-- Upload study materials
-- Choose summary format (bullet points, detailed, short)
-- Get AI-generated comprehensive summaries
-- Export or save for later review
-
-## 🔧 API Endpoints
-
-### Core Endpoints
-- `POST /upload-pdf` - Upload and process PDF files
-- `POST /generate-summary` - Create AI-powered summaries
-- `POST /generate-quiz` - Generate interactive quizzes
-- `POST /generate-flashcards` - Create flashcard sets
-- `POST /check-answers` - Grade quiz submissions
-- `GET /health` - Health check endpoint
-
-### Example API Usage
-```python
-import requests
-
-# Upload PDF
-files = {'file': open('document.pdf', 'rb')}
-response = requests.post('http://localhost:8000/upload-pdf', files=files)
-
-# Generate Quiz
-quiz_data = {
-    "text_content": "Your study material here...",
-    "num_questions": 5,
-    "subject": "Biology",
-    "difficulty": "medium"
-}
-response = requests.post('http://localhost:8000/generate-quiz', json=quiz_data)
+    API --> FE
+    FE --> U
 ```
 
-## 🏗️ Project Structure
+### Extraction agent
+
+PDF pages are classified individually (title/agenda, dense text, diagram/chart, equation) before use. Text pages are kept as text; visual pages are rendered to images and described by a vision-capable model, so diagrams and equations contribute to generation instead of being silently dropped.
+
+```mermaid
+flowchart TD
+    START[PDF uploaded] --> LOOP{For each page}
+    LOOP --> CLASSIFY[Classify page:<br/>title/agenda, dense text,<br/>diagram/chart, equation]
+    CLASSIFY -->|title/agenda| DEWEIGHT[Keep as low-weight context]
+    CLASSIFY -->|dense text| KEEPTEXT[Keep full text]
+    CLASSIFY -->|diagram/chart/equation| VISIONCALL[Render page image, describe it<br/>with a vision-capable model]
+    DEWEIGHT --> NEXT{More pages?}
+    KEEPTEXT --> NEXT
+    VISIONCALL --> NEXT
+    NEXT -->|yes| LOOP
+    NEXT -->|no| ASSEMBLE[Assemble structured<br/>document representation]
+```
+
+### Synthesis agent (draft, critique, revise)
+
+Structured summaries go through a three-step loop: a draft is generated, a critique pass checks it against the source text and a fixed quality checklist (verbatim copying, redundant concepts, thin synthesis, schema violations), and a revision pass fixes any issues found before the result is returned.
+
+```mermaid
+sequenceDiagram
+    participant Backend
+    participant Drafter as LLM (draft)
+    participant Critic as LLM (critique)
+    participant Reviser as LLM (revise)
+
+    Backend->>Drafter: Extracted content + concept-grouping instructions
+    Drafter-->>Backend: Draft summary JSON
+
+    Backend->>Critic: Draft + original source + quality checklist
+    Critic-->>Backend: Critique notes (structured)
+
+    alt Critique found issues
+        Backend->>Reviser: Draft + critique notes
+        Reviser-->>Backend: Revised summary JSON
+    else Draft passed
+        Backend->>Backend: Use draft as-is
+    end
+```
+
+### Quiz agent with grounding verification
+
+Every generated question is fact-checked against the source text. Questions whose stated answers are not supported by the source are regenerated with feedback, and persistently ungrounded questions are dropped and backfilled, which suppresses hallucinated quiz content.
+
+```mermaid
+flowchart TD
+    GEN[Generate candidate question<br/>+ options + answer] --> VERIFY[Verify answer against<br/>source text]
+    VERIFY --> FOUND{Answer grounded<br/>in source?}
+    FOUND -->|yes| ACCEPT[Accept question]
+    FOUND -->|no| REGEN[Regenerate with feedback:<br/>not supported by source<br/>up to 2 retries, then<br/>drop and backfill]
+    REGEN --> VERIFY
+    ACCEPT --> MORE{More questions<br/>to verify?}
+    MORE -->|yes| GEN
+    MORE -->|no| RETURN[Return verified quiz]
+```
+
+### Memory layer
+
+Each upload is chunked on paragraph boundaries and embedded locally with fastembed (BAAI/bge-small-en-v1.5, 384 dimensions), then stored in Supabase pgvector scoped to the user. New uploads are compared against stored chunks via a cosine-similarity RPC; substantial overlap with prior documents is surfaced in the UI before the user generates duplicate study material. Embedding runs on the backend CPU, so this layer requires no external embedding API.
+
+```mermaid
+flowchart LR
+    UPLOAD[New document uploaded] --> CHUNK[Chunk on paragraph<br/>boundaries]
+    CHUNK --> EMBED[Embed locally<br/>fastembed, 384-dim]
+    EMBED --> QUERY{Cosine similarity vs.<br/>user's stored chunks<br/>above thresholds?}
+    QUERY -->|yes| SURFACE[Surface to user:<br/>overlapping prior documents]
+    QUERY -->|no| PROCEED[Proceed normally]
+    EMBED --> STORE[(Supabase pgvector,<br/>scoped per user)]
+```
+
+### Adaptive tutor
+
+A tutor session extracts the key concepts from the material, initializes a per-concept mastery estimate, and then makes a fresh decision after every single answer: it targets the weakest unmastered concept, calibrates question difficulty to the current mastery estimate, grades the response server-side, and diagnoses why a wrong answer was likely chosen rather than just marking it incorrect. Sessions end early once every concept is mastered and close with a summary of mastered versus weak concepts.
+
+```mermaid
+sequenceDiagram
+    participant Student
+    participant TutorAgent as Tutor Agent
+    participant KnowledgeState as Knowledge state (per-concept mastery)
+
+    TutorAgent->>KnowledgeState: Initialize from extracted concepts
+
+    loop Until all concepts mastered or question cap reached
+        TutorAgent->>KnowledgeState: Read current mastery estimates
+        TutorAgent->>TutorAgent: Pick weakest unmastered concept,<br/>calibrate difficulty to its mastery
+        TutorAgent->>Student: Ask question (answer stays server-side)
+        Student->>TutorAgent: Answer
+        TutorAgent->>TutorAgent: Grade + diagnose why wrong<br/>(not just right/wrong)
+        TutorAgent->>KnowledgeState: Apply difficulty-weighted mastery update
+    end
+
+    TutorAgent->>Student: Session summary:<br/>concepts mastered vs. still weak
+```
+
+## Tech stack
+
+### Backend
+
+- FastAPI with Uvicorn
+- OpenRouter as the LLM provider (gpt-oss-120b on Cerebras for text; a separate vision-capable model for page descriptions)
+- Supabase (PostgreSQL) for auth, persistence, and vector search via pgvector
+- fastembed for local ONNX embeddings
+- PyMuPDF, python-docx, and python-pptx for document parsing
+
+### Frontend
+
+- Next.js 16 (App Router, Turbopack) with TypeScript
+- Tailwind CSS with a custom component library
+- Supabase JS client for authentication
+
+## Getting started
+
+### Prerequisites
+
+- Node.js 18 or higher
+- Python 3.10 or higher
+- A Supabase project
+- An OpenRouter API key
+
+### Backend setup
+
+```bash
+cd backend
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+Create `backend/.env`:
+
+```env
+OPENROUTER_API_KEY=your_openrouter_api_key
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+```
+
+Apply the SQL in `backend/sql/` to your Supabase project (in the SQL editor), in order: `schema.sql`, then the `migrate_*.sql` files. `migrate_memory_layer.sql` enables the pgvector extension and creates the document memory tables.
+
+Run the API:
+
+```bash
+python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+Note: the first upload after a fresh install downloads the local embedding model (approximately 100 MB) to the machine's cache.
+
+### Frontend setup
+
+```bash
+cd frontend
+npm install
+```
+
+Create `frontend/.env.local`:
+
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8000
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_anon_key
+```
+
+Run the development server:
+
+```bash
+npm run dev
+```
+
+The application is served at http://localhost:3000; interactive API documentation is available at http://localhost:8000/docs.
+
+## API overview
+
+All endpoints except `/` and `/health` require a Supabase Auth bearer token.
+
+| Endpoint | Method | Description |
+| --- | --- | --- |
+| `/upload-pdf` | POST | Upload a PDF/DOCX/PPTX; returns extracted text and overlapping prior documents |
+| `/generate-summary` | POST | Generate a summary (short, bullet points, or detailed) |
+| `/generate-quiz` | POST | Generate a grounding-verified multiple-choice quiz |
+| `/generate-flashcards` | POST | Generate a flashcard set |
+| `/check-answers` | POST | Grade a quiz and persist the attempt |
+| `/tutor/start` | POST | Start an adaptive tutor session; returns the first question |
+| `/tutor/answer` | POST | Submit an answer; returns feedback, diagnosis, and the next question or session summary |
+| `/subjects` | GET, POST | List or create the user's subjects |
+| `/subjects/{id}` | DELETE | Delete a subject |
+| `/me/stats` | GET | Aggregate profile statistics |
+| `/me/analytics` | GET | Chart-ready performance datasets |
+| `/me/recent-attempts` | GET | Recent quiz attempts |
+| `/quiz-attempts/{id}/breakdown` | GET | Per-category and per-difficulty breakdown for an attempt |
+| `/quiz-attempts/{id}/recap` | GET | Full question-by-question recap of an attempt |
+
+## Project structure
 
 ```
 bloom/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py          # FastAPI application
-│   │   ├── models.py        # Pydantic models
-│   │   ├── ai_service.py    # AI integration logic
-│   │   └── utils.py         # Utility functions
-│   ├── requirements.txt     # Python dependencies
-│   └── .env                 # Environment variables
+│   │   ├── main.py              # FastAPI routes
+│   │   ├── models.py            # Pydantic request/response models
+│   │   ├── ai_service.py        # LLM calls: synthesis, quiz grounding, tutor prompts
+│   │   ├── extraction_agent.py  # Page-by-page PDF extraction with vision descriptions
+│   │   ├── tutor_agent.py       # Adaptive tutor session state and orchestration
+│   │   ├── memory_service.py    # Per-user vector memory over uploads
+│   │   ├── db.py                # Supabase persistence layer
+│   │   └── auth.py              # Supabase Auth token verification
+│   ├── sql/                     # Database schema and migrations
+│   └── requirements.txt
 ├── frontend/
 │   ├── src/
-│   │   ├── app/            # Next.js app directory
-│   │   ├── components/     # React components
-│   │   ├── lib/           # Utility libraries
-│   │   └── types/         # TypeScript type definitions
-│   ├── package.json       # Node.js dependencies
-│   └── tailwind.config.js # Tailwind configuration
-└── README.md              # Project documentation
+│   │   ├── app/                 # Next.js App Router pages
+│   │   ├── components/          # React components (study flow, tutor, analytics)
+│   │   ├── lib/                 # API client and Supabase clients
+│   │   └── types/               # Shared TypeScript types
+│   └── package.json
+├── ARCHITECTURE_CURRENT.md      # Architecture as originally built
+├── ARCHITECTURE_FUTURE.md       # Agentic architecture design document
+└── README.md
 ```
 
-## 🌟 Key Features in Detail
+## License
 
-### AI-Powered Content Generation
-- **Context-Aware**: Understands content structure and generates relevant questions
-- **Adaptive Difficulty**: Adjusts question complexity based on selected difficulty level
-- **Comprehensive Explanations**: Provides detailed explanations for learning reinforcement
-
-### Professional Quiz Interface
-- **Single Question Display**: Focus on one question at a time
-- **Progress Tracking**: Visual progress indicators and question counters
-- **Intelligent Navigation**: Smart previous/next button logic
-- **Performance Analytics**: Detailed performance breakdowns and improvement suggestions
-
-### Interactive Flashcards
-- **3D Flip Animation**: Smooth card flip transitions
-- **Categorized Content**: Organized by subject and card type
-- **Responsive Design**: Works perfectly on all screen sizes
-
-## 🤝 Contributing
-
-We welcome contributions! Please feel free to submit pull requests, create issues, or suggest new features.
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## 📝 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- **Cerebras** for providing high-performance AI computing
-- **OpenRouter** for AI model API access
-- **Next.js Team** for the excellent React framework
-- **FastAPI** for the intuitive Python web framework
-
-## 📞 Support
-
-If you encounter any issues or have questions:
-- Create an [Issue](https://github.com/yourusername/bloom/issues)
-- Check the [Documentation](https://github.com/yourusername/bloom/wiki)
-
----
-
-Made with ❤️ for better learning experiences 
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

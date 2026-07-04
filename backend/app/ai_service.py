@@ -506,6 +506,123 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
                 }]
             }
     
+    async def generate_tutor_question(
+        self, text_content: str, concept: str, difficulty: str, subject: str, asked_questions: List[str]
+    ) -> Optional[Dict]:
+        """Generate ONE multiple-choice question targeting a specific concept
+        at a specific difficulty, for the adaptive tutor loop.
+
+        The question is grounding-verified once (reusing the quiz agent's
+        verifier) and regenerated once if unsupported — fail open, matching
+        the quiz pipeline's policy. Returns None if generation failed or
+        returned unparseable JSON.
+        """
+        max_chars = 12000
+        if len(text_content) > max_chars:
+            text_content = text_content[:max_chars] + "..."
+
+        difficulty_instructions = {
+            "easy": "Test basic recall: a definition or straightforward fact.",
+            "medium": "Test understanding: application or a conceptual connection.",
+            "hard": "Test deeper reasoning: analysis, comparison, or implications.",
+        }
+
+        avoid_block = ""
+        if asked_questions:
+            avoid_block = f"""
+Do NOT repeat or closely rephrase any of these already-asked questions:
+{json.dumps(asked_questions)}
+"""
+
+        prompt = f"""Write ONE {difficulty} level multiple-choice question about {subject} that specifically tests
+the concept "{concept}", based only on facts actually stated in the source text below.
+{difficulty_instructions[difficulty]}
+{avoid_block}
+Source text:
+{text_content}
+
+Respond with ONLY valid, minified JSON matching this schema, no text before or after:
+{{
+    "question": "...",
+    "options": ["...", "...", "...", "..."],
+    "correct_answer": "...",
+    "explanation": "...",
+    "category": "{concept}",
+    "difficulty": "{difficulty}"
+}}"""
+
+        messages = [
+            {"role": "system", "content": self.base_system_message},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            response = await self._make_request(messages)
+        except Exception:
+            return None
+
+        question = self._parse_json_response(response)
+        if question is None:
+            return None
+
+        # One grounding pass, one retry — lighter than the quiz pipeline's
+        # loop because the tutor is latency-sensitive (a student is waiting
+        # between every single question).
+        verification = await self._verify_question(question, text_content)
+        if verification is not None and not verification.get("grounded", True):
+            feedback = verification.get("supporting_evidence") or "no supporting evidence found in the source text"
+            regenerated = await self._regenerate_question(question, feedback, text_content, difficulty, subject)
+            if regenerated is not None:
+                question = regenerated
+
+        question.setdefault("category", concept)
+        question.setdefault("difficulty", difficulty)
+        return question
+
+    async def diagnose_mistake(self, question: Dict, user_answer: str, text_content: str) -> Optional[str]:
+        """Diagnose *why* a student's wrong answer was wrong — the likely
+        misconception or gap, not just the correct answer.
+
+        Returns a short diagnosis string, or None if the call failed —
+        callers should degrade to showing only the explanation (fail open,
+        this is a quality layer).
+        """
+        max_chars = 8000
+        if len(text_content) > max_chars:
+            text_content = text_content[:max_chars] + "..."
+
+        prompt = f"""A student answered a quiz question incorrectly. Diagnose WHY they likely chose that answer —
+the specific misconception, mix-up, or knowledge gap it suggests — and what to review. Address the student
+directly ("you"), be specific to their chosen answer (not generic), and keep it to 2-3 sentences.
+
+Source text the question was based on:
+{text_content}
+
+Question: {question.get('question')}
+Options: {json.dumps(question.get('options', []))}
+Correct answer: {question.get('correct_answer')}
+Student's answer: {user_answer}
+
+Respond with ONLY valid, minified JSON matching this schema, no text before or after:
+{{
+    "diagnosis": "..."
+}}"""
+
+        messages = [
+            {"role": "system", "content": self.base_system_message},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            response = await self._make_request(messages)
+        except Exception:
+            return None
+
+        parsed = self._parse_json_response(response)
+        if parsed is None or not parsed.get("diagnosis"):
+            return None
+        return parsed["diagnosis"]
+
     async def extract_key_topics(self, text_content: str) -> List[str]:
         """Extract key topics from text content for tagging"""
         prompt = f"""Analyze the following text and extract 5-8 key topics or themes.

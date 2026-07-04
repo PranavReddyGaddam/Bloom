@@ -126,6 +126,50 @@ export interface PDFUploadResponse {
   similar_documents?: SimilarDocument[];
 }
 
+export interface TutorQuestion {
+  question: string;
+  options: string[];
+  concept: string;
+  difficulty: string;
+  question_number: number;
+}
+
+export interface ConceptState {
+  concept: string;
+  mastery: number; // 0-1 estimate of understanding
+  questions_asked: number;
+  questions_correct: number;
+  mastered: boolean;
+}
+
+export interface TutorStartResponse {
+  session_id: string;
+  question: TutorQuestion;
+  concepts: ConceptState[];
+  max_questions: number;
+}
+
+export interface TutorSessionSummary {
+  total_questions: number;
+  correct_answers: number;
+  accuracy: number;
+  concepts_mastered: string[];
+  concepts_weak: string[];
+  concepts: ConceptState[];
+}
+
+export interface TutorAnswerResponse {
+  correct: boolean;
+  correct_answer: string;
+  explanation?: string | null;
+  diagnosis?: string | null; // why the wrong answer was wrong; only set on incorrect answers
+  concept: string;
+  concepts: ConceptState[];
+  done: boolean;
+  next_question?: TutorQuestion | null;
+  summary?: TutorSessionSummary | null;
+}
+
 export type SummaryType = 'short' | 'bullet_points' | 'detailed';
 export type Difficulty = 'easy' | 'medium' | 'hard';
 

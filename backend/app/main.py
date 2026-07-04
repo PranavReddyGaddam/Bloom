@@ -10,8 +10,9 @@ from pptx import Presentation
 from dotenv import load_dotenv
 
 from .ai_service import BloomAI
-from .models import SummaryRequest, QuizRequest, QuizResponse, SummaryResponse, FlashcardRequest, FlashcardResponse, AnswerCheckRequest, AnswerCheckResponse, AttemptBreakdownResponse, UserStatsResponse, UserAnalyticsResponse, AttemptRecapResponse, RecentAttempt, Subject, CreateSubjectRequest
+from .models import SummaryRequest, QuizRequest, QuizResponse, SummaryResponse, FlashcardRequest, FlashcardResponse, AnswerCheckRequest, AnswerCheckResponse, AttemptBreakdownResponse, UserStatsResponse, UserAnalyticsResponse, AttemptRecapResponse, RecentAttempt, Subject, CreateSubjectRequest, TutorStartRequest, TutorStartResponse, TutorAnswerRequest, TutorAnswerResponse
 from . import extraction_agent
+from . import tutor_agent
 from . import memory_service
 from . import db
 from . import auth
@@ -191,6 +192,42 @@ async def generate_flashcards(
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating flashcards: {str(e)}")
+
+@app.post("/tutor/start", response_model=TutorStartResponse)
+async def tutor_start(request: TutorStartRequest, user_id: str = Depends(auth.get_current_user_id)):
+    """Start an adaptive tutor session: extract the concepts to teach from
+    the uploaded material, initialize a per-concept knowledge state, and
+    return the first question (without its answer — grading is server-side)."""
+    try:
+        if not request.text_content.strip():
+            raise HTTPException(status_code=400, detail="text_content cannot be empty")
+        if not 1 <= request.max_questions <= 30:
+            raise HTTPException(status_code=400, detail="max_questions must be between 1 and 30")
+
+        result = await tutor_agent.start_session(
+            user_id, request.text_content, request.subject, request.max_questions, ai_service
+        )
+        return TutorStartResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error starting tutor session: {str(e)}")
+
+@app.post("/tutor/answer", response_model=TutorAnswerResponse)
+async def tutor_answer(request: TutorAnswerRequest, user_id: str = Depends(auth.get_current_user_id)):
+    """Submit an answer to the current tutor question. Grades it, diagnoses
+    wrong answers, updates the knowledge state, and returns either the next
+    question (targeting the weakest concept at a calibrated difficulty) or
+    the session summary."""
+    try:
+        result = await tutor_agent.submit_answer(request.session_id, user_id, request.answer, ai_service)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Tutor session not found or expired")
+        return TutorAnswerResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing answer: {str(e)}")
 
 @app.post("/subjects", response_model=Subject)
 async def create_subject(request: CreateSubjectRequest, external_user_id: str = Depends(auth.get_current_user_id)):

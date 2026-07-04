@@ -127,6 +127,54 @@ class SimilarDocument(BaseModel):
     similarity: float  # 0-1, best matching chunk pair
     overlap: float  # 0-1, fraction of the new upload's chunks that matched
 
+class TutorStartRequest(BaseModel):
+    text_content: str
+    subject: str
+    max_questions: int = 10
+
+class TutorQuestion(BaseModel):
+    question: str
+    options: List[str]
+    concept: str
+    difficulty: str
+    question_number: int
+
+class ConceptState(BaseModel):
+    concept: str
+    mastery: float  # 0-1 estimate of understanding
+    questions_asked: int
+    questions_correct: int
+    mastered: bool
+
+class TutorStartResponse(BaseModel):
+    session_id: str
+    question: TutorQuestion
+    concepts: List[ConceptState]
+    max_questions: int
+
+class TutorAnswerRequest(BaseModel):
+    session_id: str
+    answer: str
+
+class TutorSessionSummary(BaseModel):
+    total_questions: int
+    correct_answers: int
+    accuracy: float
+    concepts_mastered: List[str]
+    concepts_weak: List[str]
+    concepts: List[ConceptState]
+
+class TutorAnswerResponse(BaseModel):
+    correct: bool
+    correct_answer: str
+    explanation: Optional[str] = None
+    diagnosis: Optional[str] = None  # why the wrong answer was wrong; only set on incorrect answers
+    concept: str
+    concepts: List[ConceptState]
+    done: bool
+    next_question: Optional[TutorQuestion] = None
+    summary: Optional[TutorSessionSummary] = None
+
 class Flashcard(BaseModel):
     front: str
     back: str

@@ -13,7 +13,9 @@ import {
   UserAnalytics,
   RecentAttempt,
   AttemptRecap,
-  Subject
+  Subject,
+  TutorStartResponse,
+  TutorAnswerResponse
 } from '@/types';
 import { createClient } from '@/lib/supabase/client';
 
@@ -235,6 +237,44 @@ export const api = {
       const error = await response.text();
       throw new APIError(`Failed to delete subject: ${error}`, response.status);
     }
+  },
+
+  async startTutorSession(
+    textContent: string,
+    subject: string,
+    maxQuestions: number
+  ): Promise<TutorStartResponse> {
+    const response = await fetch(`${API_BASE_URL}/tutor/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+      body: JSON.stringify({
+        text_content: textContent,
+        subject,
+        max_questions: maxQuestions,
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to start tutor session: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  async submitTutorAnswer(sessionId: string, answer: string): Promise<TutorAnswerResponse> {
+    const response = await fetch(`${API_BASE_URL}/tutor/answer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+      body: JSON.stringify({ session_id: sessionId, answer }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to submit answer: ${error}`, response.status);
+    }
+
+    return response.json();
   },
 
   async healthCheck(): Promise<{ status: string; service: string }> {

@@ -8,14 +8,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
 import { StudyFormData, SummaryType, Difficulty, Subject, FlashcardResponse, SimilarDocument } from '@/types'
-import { ArrowLeft, RotateCcw, BookOpen, PencilLine, X, ArrowRight, History } from 'lucide-react'
+import { ArrowLeft, RotateCcw, BookOpen, PencilLine, GraduationCap, X, ArrowRight, History } from 'lucide-react'
 import { SubjectSelect } from './SubjectSelect'
 import { FlashcardCarousel } from './FlashcardCarousel'
 
 const LIME = 'text-[#D7FF3D]'
 const LIME_BG = 'bg-[#D7FF3D]'
 
-type StudyMode = 'flashcards' | 'quiz'
+type StudyMode = 'flashcards' | 'quiz' | 'tutor'
 
 interface ConfigureStepProps {
   formData: StudyFormData
@@ -26,7 +26,8 @@ interface ConfigureStepProps {
   flashcards: FlashcardResponse | null
   handleGenerate: () => void
   handleGenerateFlashcards: () => void
-  setCurrentStep: (step: 'upload' | 'configure' | 'results') => void
+  handleStartTutor: () => void
+  setCurrentStep: (step: 'upload' | 'configure' | 'results' | 'tutor') => void
   resetApp: () => void
 }
 
@@ -39,6 +40,7 @@ export function ConfigureStep({
   flashcards,
   handleGenerate,
   handleGenerateFlashcards,
+  handleStartTutor,
   setCurrentStep,
   resetApp
 }: ConfigureStepProps) {
@@ -161,7 +163,7 @@ export function ConfigureStep({
         )}
 
         {/* Mode Selection */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
           {modeCard(
             'flashcards',
             <BookOpen className="h-8 w-8" />,
@@ -173,6 +175,12 @@ export function ConfigureStep({
             <PencilLine className="h-8 w-8" />,
             'Take a practice quiz',
             'Get a summary and practice questions generated from your material'
+          )}
+          {modeCard(
+            'tutor',
+            <GraduationCap className="h-8 w-8" />,
+            'Learn with the tutor',
+            'One question at a time, adapting to your weakest concepts as you answer'
           )}
         </div>
 
@@ -247,7 +255,7 @@ export function ConfigureStep({
                 </div>
               )}
             </>
-          ) : (
+          ) : mode === 'quiz' ? (
             <>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <SubjectSelect
@@ -329,6 +337,59 @@ export function ConfigureStep({
                     </>
                   ) : (
                     'Generate Quiz'
+                  )}
+                </Button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <SubjectSelect
+                  subjectId={formData.subjectId}
+                  onSelect={(subject: Subject) =>
+                    setFormData(prev => ({ ...prev, subjectId: subject.id, subjectName: subject.name }))
+                  }
+                />
+
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium text-white/70">Session Length</Label>
+                  <Select
+                    value={formData.numQuestions.toString()}
+                    onValueChange={(value) =>
+                      setFormData(prev => ({ ...prev, numQuestions: parseInt(value) }))
+                    }
+                  >
+                    <SelectTrigger className="bg-white/5 border-white/20 text-white">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="bg-[#0d1230] border-white/15 text-white">
+                      {[5, 10, 15, 20].map(num => (
+                        <SelectItem key={num} value={num.toString()}>Up to {num} questions</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <p className="text-sm text-white/50 mt-6">
+                No difficulty to pick — the tutor starts by probing each concept, then calibrates
+                every next question to what you got right and wrong. The session ends early if you
+                master everything.
+              </p>
+
+              <div className="flex justify-end mt-8">
+                <Button
+                  onClick={handleStartTutor}
+                  disabled={loading || !formData.subjectName}
+                  className={`${LIME_BG} text-black hover:bg-[#c2e836]`}
+                >
+                  {loading ? (
+                    <>
+                      <div className="animate-spin h-4 w-4 mr-2 border-2 border-black/60 border-t-transparent rounded-full" />
+                      Preparing your session...
+                    </>
+                  ) : (
+                    'Start Tutor Session'
                   )}
                 </Button>
               </div>
