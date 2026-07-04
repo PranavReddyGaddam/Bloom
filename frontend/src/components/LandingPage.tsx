@@ -12,6 +12,10 @@ import {
   ArrowRight,
   ArrowUpRight,
   Circle,
+  ScanSearch,
+  PenLine,
+  ShieldCheck,
+  Check,
 } from 'lucide-react'
 
 const FEATURES: AccordionFeature[] = [
@@ -269,12 +273,13 @@ export default function LandingPage() {
       <section className="relative z-10 px-6 py-28 border-t border-white/10 font-sans">
         <div className="max-w-7xl mx-auto grid lg:grid-cols-2 gap-16 items-center">
           <div>
-            <span className="text-xs font-medium uppercase tracking-wide text-white/40">Study guides</span>
+            <span className="text-xs font-medium uppercase tracking-wide text-white/40">How it works</span>
             <h2 className="font-serif text-4xl md:text-5xl font-light text-white mt-4 mb-6 leading-tight">
-              Make class material <span className={`italic ${LIME}`}>instantly</span> studiable
+              Not one AI call. <span className={`italic ${LIME}`}>An agent pipeline</span>
             </h2>
             <p className="text-lg text-white/60 mb-9 leading-relaxed max-w-md font-light">
-              Turn your slides, videos, and notes into flashcard sets, practice tests, and study guides with AI.
+              Bloom reads every page of your material, drafts study content, critiques its own
+              draft against your source, and verifies every quiz question before it ever reaches you.
             </p>
             <Button
               onClick={handleNavigateToUpload}
@@ -288,36 +293,60 @@ export default function LandingPage() {
           <div className="rounded-3xl border border-white/15 bg-white/[0.06] backdrop-blur-xl p-8 font-sans">
             <div className="flex items-center justify-between mb-6">
               <span className="text-xs font-medium text-white/40 uppercase tracking-wide">
-                Study Guide
+                Agent pipeline
               </span>
-              <span className={`text-xs font-medium ${LIME}`}>Generated in 3s</span>
+              <span className={`text-xs font-medium ${LIME}`}>Biology_101.pdf</span>
             </div>
 
-            <h4 className="font-serif text-2xl font-light text-white mb-6">Biology 101</h4>
-
-            <div className="space-y-4 mb-6">
-              <div className="rounded-xl bg-white/5 border border-white/10 p-4">
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-sm font-medium text-white">Mitosis</span>
-                  <span className="text-[10px] font-medium text-white/40 uppercase tracking-wide">Key term</span>
+            <div className="space-y-3">
+              <div className="rounded-xl bg-white/5 border border-white/10 p-4 flex items-start gap-3">
+                <div className={`h-7 w-7 rounded-lg ${LIME_BG}/15 flex items-center justify-center shrink-0 mt-0.5`}>
+                  <ScanSearch className={`h-3.5 w-3.5 ${LIME}`} />
                 </div>
-                <p className="text-sm text-white/50 leading-relaxed">
-                  A type of cell division that produces genetically identical daughter cells.
-                </p>
+                <div className="min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium text-white">Extract & classify</span>
+                    <Check className={`h-3.5 w-3.5 ${LIME} shrink-0`} />
+                  </div>
+                  <p className="text-sm text-white/50 leading-relaxed">
+                    24 pages read — 3 diagrams sent to a vision model for description.
+                  </p>
+                </div>
               </div>
-              <div className="rounded-xl bg-white/5 border border-white/10 p-4">
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-sm font-medium text-white">Interphase</span>
-                  <span className="text-[10px] font-medium text-white/40 uppercase tracking-wide">Key term</span>
+
+              <div className="rounded-xl bg-white/5 border border-white/10 p-4 flex items-start gap-3">
+                <div className={`h-7 w-7 rounded-lg ${LIME_BG}/15 flex items-center justify-center shrink-0 mt-0.5`}>
+                  <PenLine className={`h-3.5 w-3.5 ${LIME}`} />
                 </div>
-                <p className="text-sm text-white/50 leading-relaxed">
-                  The cell prepares for mitosis by duplicating its DNA.
-                </p>
+                <div className="min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium text-white">Draft & self-critique</span>
+                    <Check className={`h-3.5 w-3.5 ${LIME} shrink-0`} />
+                  </div>
+                  <p className="text-sm text-white/50 leading-relaxed">
+                    Flagged 2 vague explanations, revised against the source text.
+                  </p>
+                </div>
+              </div>
+
+              <div className="rounded-xl bg-white/5 border border-white/10 p-4 flex items-start gap-3">
+                <div className={`h-7 w-7 rounded-lg ${LIME_BG}/15 flex items-center justify-center shrink-0 mt-0.5`}>
+                  <ShieldCheck className={`h-3.5 w-3.5 ${LIME}`} />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium text-white">Ground & verify</span>
+                    <Check className={`h-3.5 w-3.5 ${LIME} shrink-0`} />
+                  </div>
+                  <p className="text-sm text-white/50 leading-relaxed">
+                    Every quiz question checked against the source; 1 regenerated.
+                  </p>
+                </div>
               </div>
             </div>
 
-            <div className="rounded-xl bg-white/10 px-5 py-3.5 flex items-center justify-between">
-              <span className="text-xs font-medium text-white/80">12 more terms generated</span>
+            <div className="rounded-xl bg-white/10 px-5 py-3.5 flex items-center justify-between mt-4">
+              <span className="text-xs font-medium text-white/80">Study set ready — Biology 101</span>
               <ArrowUpRight className="h-3.5 w-3.5 text-white/60" />
             </div>
           </div>
@@ -327,22 +356,53 @@ export default function LandingPage() {
       {/* CTA banner */}
       <section className="relative z-10 px-6 py-28">
         <div className="max-w-7xl mx-auto">
-          <div className="rounded-3xl border border-white/15 bg-white/[0.06] backdrop-blur-xl px-8 py-20 sm:px-16 text-center relative overflow-hidden">
+          <div className="rounded-3xl border border-white/15 bg-white/[0.06] backdrop-blur-xl px-8 py-16 sm:px-16 relative overflow-hidden">
             <div className={`absolute top-0 right-0 h-72 w-72 rounded-full ${LIME_BG} opacity-20 blur-3xl -translate-y-1/2 translate-x-1/3`} />
-            <h2 className="font-serif text-4xl md:text-6xl font-light text-white mb-6 relative">
-              Test prep for <span className={`italic ${LIME}`}>any</span> subject
-            </h2>
-            <p className="text-lg text-white/60 mb-11 max-w-xl mx-auto leading-relaxed relative font-sans font-light">
-              Memorize anything with personalized practice tests and study sessions. 98% of students say Bloom has improved their understanding.
-            </p>
-            <Button
-              onClick={handleNavigateToUpload}
-              size="lg"
-              className={`${LIME_BG} text-black hover:bg-[#c2e836] rounded-full px-7 h-12 font-medium text-base relative font-sans`}
-            >
-              Get started
-              <ArrowRight className="h-4 w-4" />
-            </Button>
+
+            <div className="grid lg:grid-cols-2 gap-14 items-center relative">
+              <div>
+                <h2 className="font-serif text-4xl md:text-5xl font-light text-white mb-6 leading-tight">
+                  One upload. <span className={`italic ${LIME}`}>Every</span> way to study.
+                </h2>
+                <p className="text-lg text-white/60 mb-9 max-w-md leading-relaxed font-sans font-light">
+                  Bloom turns whatever you give it — slides, notes, a textbook chapter — into
+                  flashcards, a practice test, and a study guide, all grounded in that one source.
+                </p>
+                <Button
+                  onClick={handleNavigateToUpload}
+                  size="lg"
+                  className={`${LIME_BG} text-black hover:bg-[#c2e836] rounded-full px-7 h-12 font-medium text-base font-sans`}
+                >
+                  Get started
+                  <ArrowRight className="h-4 w-4" />
+                </Button>
+              </div>
+
+              <div className="flex flex-col items-center gap-4">
+                <div className="rounded-xl bg-white/10 border border-white/15 px-5 py-3 flex items-center gap-2.5 w-fit">
+                  <FileText className="h-4 w-4 text-white/50" />
+                  <span className="text-sm font-medium text-white/80">Biology_101.pdf</span>
+                </div>
+
+                <div className="h-8 w-px bg-gradient-to-b from-white/20 to-transparent" />
+
+                <div className="flex flex-wrap justify-center gap-3">
+                  {[
+                    { icon: Layers, label: 'Flashcards' },
+                    { icon: Target, label: 'Practice Test' },
+                    { icon: FileText, label: 'Study Guide' },
+                  ].map(({ icon: Icon, label }) => (
+                    <div
+                      key={label}
+                      className="rounded-xl bg-white/5 border border-white/10 px-4 py-3 flex flex-col items-center gap-2 w-28"
+                    >
+                      <Icon className={`h-4 w-4 ${LIME}`} />
+                      <span className="text-xs font-medium text-white/70 text-center">{label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </section>

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { api, APIError } from '@/lib/api'
 import {
@@ -10,7 +10,8 @@ import {
   UserAnswer,
   FlashcardResponse,
   StudyFormData,
-  Difficulty
+  Difficulty,
+  SimilarDocument
 } from '@/types'
 import { UploadStep } from '@/components/study/UploadStep'
 import { ConfigureStep } from '@/components/study/ConfigureStep'
@@ -20,6 +21,13 @@ interface BloomAppProps {
   initialStep?: 'upload' | 'configure' | 'results'
 }
 
+export interface UploadedFileInfo {
+  name: string
+  size: number
+}
+
+const STORED_FILE_KEY = 'bloom-uploaded-file'
+
 export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
   const router = useRouter()
 
@@ -27,11 +35,23 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // State management
-  const [file, setFile] = useState<File | null>(null)
+  const [file, setFile] = useState<UploadedFileInfo | null>(null)
   const [textContent, setTextContent] = useState<string>('')
-  const [pastedText, setPastedText] = useState<string>('')
-  const [flashcardPdfFile, setFlashcardPdfFile] = useState<File | null>(null)
-  const [flashcardPdfContent, setFlashcardPdfContent] = useState<string>('')
+  const [similarDocuments, setSimilarDocuments] = useState<SimilarDocument[]>([])
+
+  // Restore the uploaded file across page refreshes
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(STORED_FILE_KEY)
+      if (stored) {
+        const { name, size, textContent: storedText } = JSON.parse(stored)
+        setFile({ name, size })
+        setTextContent(storedText)
+      }
+    } catch {
+      localStorage.removeItem(STORED_FILE_KEY)
+    }
+  }, [])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>('')
   const [summary, setSummary] = useState<SummaryResponse | null>(null)
@@ -40,8 +60,6 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
   const [quizResult, setQuizResult] = useState<QuizResult | null>(null)
   const [userAnswers, setUserAnswers] = useState<UserAnswer[]>([])
   const [currentStep, setCurrentStep] = useState<'upload' | 'configure' | 'results'>(initialStep)
-  const [activeTab, setActiveTab] = useState('upload-files')
-  const [flashcardActiveTab, setFlashcardActiveTab] = useState('upload-pdf')
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
 
   // Form data
@@ -65,20 +83,27 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
       return
     }
 
-    setFile(selectedFile)
+    setFile({ name: selectedFile.name, size: selectedFile.size })
     setError('')
     setLoading(true)
 
     try {
       const result = await api.uploadPDF(selectedFile)
       setTextContent(result.text_content)
+      setSimilarDocuments(result.similar_documents ?? [])
+      localStorage.setItem(STORED_FILE_KEY, JSON.stringify({
+        name: selectedFile.name,
+        size: selectedFile.size,
+        textContent: result.text_content
+      }))
       setCurrentStep('configure')
+      router.push('/upload?step=configure')
     } catch (err) {
       setError(err instanceof APIError ? err.message : 'Failed to upload PDF')
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [router])
 
   const handleGenerate = useCallback(async () => {
     if (!textContent) {
@@ -115,6 +140,29 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     }
   }, [textContent, formData, router])
 
+  const handleGenerateFlashcards = useCallback(async () => {
+    if (!textContent) {
+      return
+    }
+
+    setLoading(true)
+    setError('')
+
+    try {
+      const result = await api.generateFlashcards(
+        textContent,
+        formData.numCards,
+        formData.subjectName,
+        formData.cardType
+      )
+      setFlashcards(result)
+    } catch (err) {
+      setError(err instanceof APIError ? err.message : 'Failed to generate flashcards')
+    } finally {
+      setLoading(false)
+    }
+  }, [textContent, formData])
+
   const handleAnswerSelect = useCallback((questionIndex: number, selectedOption: string) => {
     setUserAnswers(prev => {
       const updated = prev.filter(a => a.questionIndex !== questionIndex)
@@ -142,62 +190,42 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     }
   }, [quiz, userAnswers, formData.subjectId])
 
+  const removeFile = useCallback(() => {
+    setFile(null)
+    setTextContent('')
+    setSimilarDocuments([])
+    localStorage.removeItem(STORED_FILE_KEY)
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''
+    }
+  }, [])
+
   const resetApp = useCallback(() => {
     setFile(null)
     setTextContent('')
-    setPastedText('')
-    setFlashcardPdfFile(null)
-    setFlashcardPdfContent('')
+    setSimilarDocuments([])
+    localStorage.removeItem(STORED_FILE_KEY)
     setSummary(null)
     setQuiz(null)
     setFlashcards(null)
     setQuizResult(null)
     setUserAnswers([])
     setCurrentStep('upload')
-    setActiveTab('upload-files')
     setError('')
 
     // Reset URL to upload page
     router.push('/upload')
   }, [router])
 
-  // Add separate reset function for flashcards
-  const resetFlashcards = useCallback(() => {
-    setFlashcards(null)
-    setPastedText('')
-    setFlashcardPdfFile(null)
-    setFlashcardPdfContent('')
-    setError('')
-  }, [])
-
   if (currentStep === 'upload') {
     return (
       <UploadStep
         fileInputRef={fileInputRef}
         file={file}
-        textContent={textContent}
-        pastedText={pastedText}
-        setPastedText={setPastedText}
-        flashcardPdfFile={flashcardPdfFile}
-        flashcardPdfContent={flashcardPdfContent}
-        setFlashcardPdfFile={setFlashcardPdfFile}
-        setFlashcardPdfContent={setFlashcardPdfContent}
         loading={loading}
-        setLoading={setLoading}
         error={error}
-        setError={setError}
-        flashcards={flashcards}
-        setFlashcards={setFlashcards}
-        resetFlashcards={resetFlashcards}
-        formData={formData}
-        setFormData={setFormData}
-        activeTab={activeTab}
-        setActiveTab={setActiveTab}
-        flashcardActiveTab={flashcardActiveTab}
-        setFlashcardActiveTab={setFlashcardActiveTab}
         handleFileUpload={handleFileUpload}
-        setTextContent={setTextContent}
-        setCurrentStep={setCurrentStep}
+        removeFile={removeFile}
         resetApp={resetApp}
       />
     )
@@ -207,7 +235,11 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
         formData={formData}
         setFormData={setFormData}
         loading={loading}
+        error={error}
+        similarDocuments={similarDocuments}
+        flashcards={flashcards}
         handleGenerate={handleGenerate}
+        handleGenerateFlashcards={handleGenerateFlashcards}
         setCurrentStep={setCurrentStep}
         resetApp={resetApp}
       />

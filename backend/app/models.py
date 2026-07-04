@@ -121,6 +121,12 @@ class AttemptRecapResponse(BaseModel):
     created_at: str
     questions: List[RecapQuestion]
 
+class SimilarDocument(BaseModel):
+    filename: str
+    uploaded_at: str
+    similarity: float  # 0-1, best matching chunk pair
+    overlap: float  # 0-1, fraction of the new upload's chunks that matched
+
 class Flashcard(BaseModel):
     front: str
     back: str

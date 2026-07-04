@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from .ai_service import BloomAI
 from .models import SummaryRequest, QuizRequest, QuizResponse, SummaryResponse, FlashcardRequest, FlashcardResponse, AnswerCheckRequest, AnswerCheckResponse, AttemptBreakdownResponse, UserStatsResponse, UserAnalyticsResponse, AttemptRecapResponse, RecentAttempt, Subject, CreateSubjectRequest
 from . import extraction_agent
+from . import memory_service
 from . import db
 from . import auth
 
@@ -70,10 +71,22 @@ async def upload_pdf(file: UploadFile = File(...), user_id: str = Depends(auth.g
         # Clean up temporary file
         os.remove(file_path)
 
+        # Memory layer: store this upload in the user's vector memory and
+        # surface prior uploads with substantial overlap. Best-effort — a
+        # memory failure must never fail the upload itself.
+        similar_documents = []
+        try:
+            similar_documents = await memory_service.remember_upload(
+                user_id, file.filename, text_content
+            )
+        except Exception:
+            pass
+
         return {
             "filename": file.filename,
             "text_content": text_content,
-            "word_count": len(text_content.split())
+            "word_count": len(text_content.split()),
+            "similar_documents": similar_documents,
         }
 
     except Exception as e:

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
+import Image from 'next/image'
 import { api } from '@/lib/api'
 import { RecentAttempt } from '@/types'
 import { PanelLeft, Check } from 'lucide-react'
@@ -68,12 +69,20 @@ export function RecentQuizzesSidebar() {
       onMouseLeave={() => mode === 'hover' && setHovering(false)}
     >
       <div className="p-4 h-[52px] flex items-center">
-        {isVisuallyExpanded && (
+        {isVisuallyExpanded ? (
           <button
             onClick={() => router.push('/')}
             className="text-xl font-semibold text-white font-sans truncate"
           >
             Bloom
+          </button>
+        ) : (
+          <button
+            onClick={() => router.push('/')}
+            title="Bloom"
+            className="shrink-0"
+          >
+            <Image src="/favicon-32.png" alt="Bloom" width={24} height={24} className="rounded" />
           </button>
         )}
       </div>

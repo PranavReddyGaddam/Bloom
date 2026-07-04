@@ -112,10 +112,18 @@ export interface AttemptRecap {
   questions: RecapQuestion[];
 }
 
+export interface SimilarDocument {
+  filename: string;
+  uploaded_at: string;
+  similarity: number; // 0-1, best matching chunk pair
+  overlap: number; // 0-1, fraction of the new upload that matched
+}
+
 export interface PDFUploadResponse {
   filename: string;
   text_content: string;
   word_count: number;
+  similar_documents?: SimilarDocument[];
 }
 
 export type SummaryType = 'short' | 'bullet_points' | 'detailed';

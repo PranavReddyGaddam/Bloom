@@ -83,33 +83,37 @@ export function SubjectSelect({ subjectId, onSelect, labelHtmlFor }: SubjectSele
         <Label htmlFor={labelHtmlFor} className="text-sm font-medium text-white/70">
           {subjects.length === 0 ? 'Create your first subject' : 'New subject'}
         </Label>
-        <div className="flex gap-2">
+        <div className="space-y-2">
           <Input
             id={labelHtmlFor}
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
             placeholder="e.g. Deep Learning"
-            className="bg-white/5 border-white/20 text-white placeholder:text-white/30"
+            className="w-full bg-white/5 border-white/20 text-white placeholder:text-white/30 focus-visible:ring-[#D7FF3D]/40 focus-visible:border-[#D7FF3D]/40 focus-visible:ring-offset-0"
           />
-          <Button
-            type="button"
-            onClick={handleCreate}
-            disabled={!newName.trim()}
-            className="bg-[#D7FF3D] text-black hover:bg-[#c2e836] shrink-0"
-          >
-            Create
-          </Button>
-          {subjects.length > 0 && (
+          <div className="flex gap-2">
             <Button
               type="button"
-              variant="outline"
-              onClick={() => setCreating(false)}
-              className="border-white/20 bg-white/5 text-white hover:bg-white/10 shrink-0"
+              onClick={handleCreate}
+              disabled={!newName.trim()}
+              size="sm"
+              className="bg-[#D7FF3D] text-black hover:bg-[#c2e836]"
             >
-              Cancel
+              Create
             </Button>
-          )}
+            {subjects.length > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setCreating(false)}
+                className="border-white/20 bg-white/5 text-white hover:bg-white/10 hover:text-white"
+              >
+                Cancel
+              </Button>
+            )}
+          </div>
         </div>
         {error && <p className="text-xs text-red-300">{error}</p>}
       </div>

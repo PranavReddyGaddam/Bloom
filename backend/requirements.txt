@@ -9,4 +9,5 @@ python-pptx==1.0.2
 pydantic==2.13.4
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
-supabase==2.31.0 
+supabase==2.31.0
+fastembed==0.8.0 
