@@ -1,5 +1,6 @@
 import os
-import requests
+import asyncio
+import httpx
 import json
 import re
 import base64
@@ -22,7 +23,33 @@ class BloomAI:
         }
 
         self.base_system_message = "You are Bloom AI, an expert educational assistant specialized in creating summaries and quizzes from academic content. Always provide accurate, well-structured responses."
-    
+
+        # One shared async client for all LLM calls. Generous read timeout:
+        # long generations (10-question quizzes, detailed summaries) can take
+        # well over httpx's 5s default.
+        self._client = httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=10.0))
+
+    @staticmethod
+    def _truncate(text: str, max_chars: int) -> str:
+        """Budget-truncate text at a natural boundary (ROADMAP 5.2).
+
+        Prefers the last paragraph break before the budget, then the last
+        sentence end, then the last whitespace — never a mid-sentence slice.
+        Boundaries are only used if they keep most of the budget, so a
+        pathological input (one giant paragraph) still fills the window.
+        """
+        if len(text) <= max_chars:
+            return text
+        window = text[:max_chars]
+        for boundary in ("\n\n", ". ", "\n", " "):
+            cut = window.rfind(boundary)
+            if cut >= int(max_chars * 0.7):
+                return window[: cut + (1 if boundary == ". " else 0)].rstrip() + "\n..."
+        return window + "..."
+
+    async def aclose(self):
+        await self._client.aclose()
+
     async def _make_request(self, messages: List[Dict]) -> str:
         """Make a request to the OpenRouter API"""
         data = {
@@ -32,9 +59,9 @@ class BloomAI:
             },
             "messages": messages
         }
-        
+
         try:
-            response = requests.post(self.url, headers=self.headers, json=data)
+            response = await self._client.post(self.url, headers=self.headers, json=data)
             response.raise_for_status()
             response_data = response.json()
             return response_data["choices"][0]["message"]["content"]
@@ -79,7 +106,7 @@ class BloomAI:
         }
 
         try:
-            response = requests.post(self.url, headers=self.headers, json=data)
+            response = await self._client.post(self.url, headers=self.headers, json=data)
             response.raise_for_status()
             response_data = response.json()
             return response_data["choices"][0]["message"]["content"]
@@ -192,20 +219,38 @@ Respond with ONLY valid, minified JSON matching this exact schema, no markdown f
 
         return self._parse_json_response(response)
 
-    async def generate_summary(self, text_content: str, summary_type: str, subject: Optional[str] = None) -> Dict:
+    def _weak_concepts_block(self, weak_concepts: Optional[List[str]]) -> str:
+        """Emphasis hint injected into generation prompts when the memory
+        layer knows the student previously struggled with concepts that
+        overlap this material (ROADMAP 3.2)."""
+        if not weak_concepts:
+            return ""
+        return f"""
+The student has studied overlapping material before and previously struggled with these concepts:
+{json.dumps(weak_concepts)}
+Give these concepts extra attention and coverage where the source text supports it.
+"""
+
+    async def generate_summary(
+        self, text_content: str, summary_type: str, subject: Optional[str] = None,
+        progress=None, weak_concepts: Optional[List[str]] = None,
+    ) -> Dict:
         """Generate a summary based on the specified type"""
 
+        def _report(stage: str):
+            if progress:
+                progress(stage)
+
         # Truncate content if too long (approximate token limit)
-        max_chars = 15000  # Rough estimate for token limits
-        if len(text_content) > max_chars:
-            text_content = text_content[:max_chars] + "..."
+        text_content = self._truncate(text_content, 15000)
 
         subject_context = f" in the field of {subject}" if subject else ""
+        emphasis = self._weak_concepts_block(weak_concepts)
 
         if summary_type == "short":
             prompt = f"""Create a concise summary of the following text{subject_context}.
             Keep it to 2-3 paragraphs maximum, focusing on the most important points.
-
+            {emphasis}
             Text: {text_content}
 
             Provide your response in this JSON format:
@@ -226,7 +271,7 @@ Respond with ONLY valid, minified JSON matching this exact schema, no markdown f
             - List 2-4 supporting details as short sub-points (specific facts, examples, names, numbers worth remembering)
 
             Do not simply restate bullet points from the source material verbatim. Synthesize and explain.
-
+            {emphasis}
             Respond with ONLY valid, minified JSON matching the schema below. Do not use markdown formatting
             (no **, no #, no bullet characters) anywhere in the JSON values. Do not include any text before or
             after the JSON object.
@@ -249,7 +294,7 @@ Respond with ONLY valid, minified JSON matching this exact schema, no markdown f
             prompt = f"""Create a comprehensive, detailed summary of the following text{subject_context}.
             Include all major concepts, methodologies, findings, and conclusions.
             Organize into clear sections with headings.
-
+            {emphasis}
             Text: {text_content}
 
             Provide your response in this JSON format:
@@ -263,6 +308,7 @@ Respond with ONLY valid, minified JSON matching this exact schema, no markdown f
             {"role": "user", "content": prompt}
         ]
 
+        _report("Drafting the summary")
         response = await self._make_request(messages)
 
         draft = self._parse_json_response(response)
@@ -278,8 +324,10 @@ Respond with ONLY valid, minified JSON matching this exact schema, no markdown f
         # "short" stays single-shot — its plain-paragraph output doesn't have
         # the same structured failure modes and isn't worth the extra call.
         if summary_type in ("bullet_points", "detailed"):
+            _report("Critiquing the draft summary")
             critique = await self._critique_summary(draft, text_content, summary_type)
             if critique and critique.get("needs_revision") and critique.get("issues"):
+                _report("Revising the summary")
                 revised = await self._revise_summary(draft, critique["issues"], text_content, summary_type)
                 if revised is not None:
                     return revised
@@ -370,7 +418,8 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
         return self._parse_json_response(response)
 
     async def _ground_questions(
-        self, questions: List[Dict], text_content: str, difficulty: str, subject: str
+        self, questions: List[Dict], text_content: str, difficulty: str, subject: str,
+        progress=None,
     ) -> List[Dict]:
         """Verify each question against the source text, regenerating
         ungrounded ones (up to 2 retries) before dropping and backfilling
@@ -379,12 +428,24 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
         rather than losing a question over unrelated API trouble.
         """
         MAX_RETRIES = 2
-        result: List[Dict] = []
 
-        for question in questions:
+        total = len(questions)
+        verified_count = 0
+
+        def _report_verified():
+            # Verification runs concurrently, so "question 3 of 10" would be
+            # meaningless — report how many have finished instead.
+            nonlocal verified_count
+            verified_count += 1
+            if progress:
+                progress(f"Verifying answers against your material ({verified_count} of {total})")
+
+        async def ground_one(question: Dict) -> Dict:
             current = question
             verified_grounded = False
 
+            # Retries for a single question stay sequential — each regeneration
+            # depends on the previous verification's feedback.
             for attempt in range(MAX_RETRIES + 1):
                 verification = await self._verify_question(current, text_content)
 
@@ -414,18 +475,25 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
                 )
                 current = replacement if replacement is not None else current
 
-            result.append(current)
+            _report_verified()
+            return current
 
-        return result
+        # Questions are independent of each other — verify them concurrently.
+        return list(await asyncio.gather(*(ground_one(q) for q in questions)))
 
-    async def generate_quiz(self, text_content: str, num_questions: int, subject: str, difficulty: str) -> Dict:
+    async def generate_quiz(
+        self, text_content: str, num_questions: int, subject: str, difficulty: str,
+        progress=None, weak_concepts: Optional[List[str]] = None,
+    ) -> Dict:
         """Generate a quiz based on the text content"""
-        
-        # Truncate content if too long
-        max_chars = 12000  # Leave room for the prompt
-        if len(text_content) > max_chars:
-            text_content = text_content[:max_chars] + "..."
-        
+
+        def _report(stage: str):
+            if progress:
+                progress(stage)
+
+        # Truncate content if too long, leaving room for the prompt
+        text_content = self._truncate(text_content, 12000)
+
         difficulty_instructions = {
             "easy": "Focus on basic concepts, definitions, and straightforward facts. Avoid complex reasoning.",
             "medium": "Include some analysis and application questions. Mix factual and conceptual questions.",
@@ -436,7 +504,7 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
 
         Difficulty level: {difficulty}
         Instructions: {difficulty_instructions[difficulty]}
-
+        {self._weak_concepts_block(weak_concepts)}
         Content: {text_content}
 
         For each question:
@@ -470,6 +538,7 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
             {"role": "user", "content": prompt}
         ]
 
+        _report(f"Writing {num_questions} questions")
         response = await self._make_request(messages)
 
         try:
@@ -484,8 +553,10 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
                     for question in quiz_data["questions"]:
                         question.setdefault("category", "General")
                         question.setdefault("difficulty", difficulty)
+                    _report("Verifying answers against your material")
                     quiz_data["questions"] = await self._ground_questions(
-                        quiz_data["questions"], text_content, difficulty, subject
+                        quiz_data["questions"], text_content, difficulty, subject,
+                        progress=progress,
                     )
                     return quiz_data
                 else:
@@ -507,19 +578,22 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
             }
     
     async def generate_tutor_question(
-        self, text_content: str, concept: str, difficulty: str, subject: str, asked_questions: List[str]
+        self, text_content: str, concept: str, difficulty: str, subject: str, asked_questions: List[str],
+        misconceptions: Optional[List[str]] = None,
+        variant_of: Optional[Dict] = None,
+        answer_mode: str = "multiple_choice",
     ) -> Optional[Dict]:
-        """Generate ONE multiple-choice question targeting a specific concept
-        at a specific difficulty, for the adaptive tutor loop.
+        """Generate ONE question targeting a specific concept at a specific
+        difficulty, for the adaptive tutor loop — multiple-choice, or
+        open-ended ("free_text") where the tutor wants to see the student's
+        own words (ROADMAP 4.2).
 
         The question is grounding-verified once (reusing the quiz agent's
         verifier) and regenerated once if unsupported — fail open, matching
         the quiz pipeline's policy. Returns None if generation failed or
         returned unparseable JSON.
         """
-        max_chars = 12000
-        if len(text_content) > max_chars:
-            text_content = text_content[:max_chars] + "..."
+        text_content = self._truncate(text_content, 12000)
 
         difficulty_instructions = {
             "easy": "Test basic recall: a definition or straightforward fact.",
@@ -534,15 +608,41 @@ Do NOT repeat or closely rephrase any of these already-asked questions:
 {json.dumps(asked_questions)}
 """
 
-        prompt = f"""Write ONE {difficulty} level multiple-choice question about {subject} that specifically tests
-the concept "{concept}", based only on facts actually stated in the source text below.
-{difficulty_instructions[difficulty]}
-{avoid_block}
-Source text:
-{text_content}
+        variant_block = ""
+        if variant_of:
+            variant_block = f"""
+The student previously answered this question on the same knowledge point:
+{json.dumps({"question": variant_of.get("question"), "correct_answer": variant_of.get("correct_answer")})}
+Your question must test the SAME underlying fact or idea, but in a genuinely DIFFERENT form — an
+applied scenario, the reversed direction (given the answer, ask for the condition), a negative
+framing ("which is NOT..."), or a new concrete example. It must NOT be answerable just by
+remembering the earlier question's answer wording: do not reuse its options, and do not make the
+earlier correct answer's text the correct option verbatim.
+"""
 
-Respond with ONLY valid, minified JSON matching this schema, no text before or after:
-{{
+        misconception_block = ""
+        if misconceptions:
+            misconception_block = f"""
+In past sessions this student showed these misconceptions about this concept:
+{json.dumps(misconceptions)}
+Prefer a question that would reveal whether the student still holds one of these misconceptions —
+for example by including a plausible wrong option that matches the misconception.
+"""
+
+        if answer_mode == "free_text":
+            form_instruction = """Write ONE open-ended question the student must answer in their own words (1-3
+sentences) — no answer options. "correct_answer" is the model answer: the complete, specific answer
+you would accept, stated in 1-3 sentences."""
+            schema = f"""{{
+    "question": "...",
+    "correct_answer": "the model answer in 1-3 sentences",
+    "explanation": "...",
+    "category": "{concept}",
+    "difficulty": "{difficulty}"
+}}"""
+        else:
+            form_instruction = "Write ONE multiple-choice question with exactly 4 answer options."
+            schema = f"""{{
     "question": "...",
     "options": ["...", "...", "...", "..."],
     "correct_answer": "...",
@@ -550,6 +650,17 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
     "category": "{concept}",
     "difficulty": "{difficulty}"
 }}"""
+
+        prompt = f"""Write ONE {difficulty} level question about {subject} that specifically tests
+the concept "{concept}", based only on facts actually stated in the source text below.
+{form_instruction}
+{difficulty_instructions[difficulty]}
+{avoid_block}{variant_block}{misconception_block}
+Source text:
+{text_content}
+
+Respond with ONLY valid, minified JSON matching this schema, no text before or after:
+{schema}"""
 
         messages = [
             {"role": "system", "content": self.base_system_message},
@@ -567,9 +678,11 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
 
         # One grounding pass, one retry — lighter than the quiz pipeline's
         # loop because the tutor is latency-sensitive (a student is waiting
-        # between every single question).
+        # between every single question). Free-text questions get the verify
+        # pass but no regeneration (the regenerator produces multiple-choice)
+        # — an ungrounded free-text question is kept, matching fail-open.
         verification = await self._verify_question(question, text_content)
-        if verification is not None and not verification.get("grounded", True):
+        if verification is not None and not verification.get("grounded", True) and answer_mode != "free_text":
             feedback = verification.get("supporting_evidence") or "no supporting evidence found in the source text"
             regenerated = await self._regenerate_question(question, feedback, text_content, difficulty, subject)
             if regenerated is not None:
@@ -577,7 +690,58 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
 
         question.setdefault("category", concept)
         question.setdefault("difficulty", difficulty)
+        question["answer_mode"] = answer_mode
+        if answer_mode == "free_text":
+            question["options"] = []
         return question
+
+    async def grade_free_text_answer(self, question: Dict, user_answer: str, text_content: str) -> Optional[Dict]:
+        """Judge a student's typed answer against the model answer and the
+        source text (ROADMAP 4.2).
+
+        Returns {"verdict": "correct" | "partial" | "incorrect",
+        "missing": str | None} where "missing" names what the answer lacked
+        (set for partial/incorrect). Returns None if the grading call failed
+        or returned unparseable JSON — callers should fail open (treat as
+        correct) matching the pipeline-wide policy: an API failure must
+        never punish the student.
+        """
+        text_content = self._truncate(text_content, 8000)
+
+        prompt = f"""You are grading a student's short written answer against a model answer and the source text
+the question was based on. Judge the substance, not the wording: accept synonyms, paraphrase, and
+different sentence structure. Grade:
+- "correct": the answer conveys the key point(s) of the model answer
+- "partial": the answer has real, relevant substance but misses or gets wrong a key part
+- "incorrect": the answer is wrong, off-topic, or empty of substance
+
+Source text:
+{text_content}
+
+Question: {question.get('question')}
+Model answer: {question.get('correct_answer')}
+Student's answer: {user_answer}
+
+Respond with ONLY valid, minified JSON matching this schema, no text before or after:
+{{
+    "verdict": "correct" or "partial" or "incorrect",
+    "missing": "one sentence naming specifically what the answer missed or got wrong, or null if correct"
+}}"""
+
+        messages = [
+            {"role": "system", "content": self.base_system_message},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            response = await self._make_request(messages)
+        except Exception:
+            return None
+
+        parsed = self._parse_json_response(response)
+        if parsed is None or parsed.get("verdict") not in ("correct", "partial", "incorrect"):
+            return None
+        return {"verdict": parsed["verdict"], "missing": parsed.get("missing")}
 
     async def diagnose_mistake(self, question: Dict, user_answer: str, text_content: str) -> Optional[str]:
         """Diagnose *why* a student's wrong answer was wrong — the likely
@@ -587,9 +751,7 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
         callers should degrade to showing only the explanation (fail open,
         this is a quality layer).
         """
-        max_chars = 8000
-        if len(text_content) > max_chars:
-            text_content = text_content[:max_chars] + "..."
+        text_content = self._truncate(text_content, 8000)
 
         prompt = f"""A student answered a quiz question incorrectly. Diagnose WHY they likely chose that answer —
 the specific misconception, mix-up, or knowledge gap it suggests — and what to review. Address the student
@@ -628,7 +790,7 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
         prompt = f"""Analyze the following text and extract 5-8 key topics or themes.
         Return only the topics as a comma-separated list.
         
-        Text: {text_content[:5000]}...
+        Text: {self._truncate(text_content, 5000)}
         
         Topics:"""
         
@@ -648,9 +810,7 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
         """Generate flashcards based on the text content"""
         
         # Truncate content if too long
-        max_chars = 12000
-        if len(text_content) > max_chars:
-            text_content = text_content[:max_chars] + "..."
+        text_content = self._truncate(text_content, 12000)
         
         card_type_instructions = {
             "definition": "Create cards with terms/concepts on the front and their definitions on the back.",

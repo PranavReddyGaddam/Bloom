@@ -261,8 +261,7 @@ bloom/
 │   │   ├── lib/                 # API client and Supabase clients
 │   │   └── types/               # Shared TypeScript types
 │   └── package.json
-├── ARCHITECTURE_CURRENT.md      # Architecture as originally built
-├── ARCHITECTURE_FUTURE.md       # Agentic architecture design document
+├── ROADMAP.md                   # Planned improvements, in build order
 └── README.md
 ```
 

@@ -113,9 +113,12 @@ uploads/
 
 
 # Plan files (implementation plans, not part of the app)
-ARCHITECTURE_*.md
+HACKATHON.md
+ROADMAP*.md
 
 # Claude Code local config
 .claude/
 .mcp.json
 **/.mcp.json
+
+.codex/

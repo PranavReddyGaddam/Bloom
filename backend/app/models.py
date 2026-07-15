@@ -25,7 +25,6 @@ class QuizRequest(BaseModel):
     num_questions: int
     subject: str
     difficulty: str  # "easy", "medium", "hard"
-    previous_score: Optional[int] = None
 
 class QuizResponse(BaseModel):
     questions: List[QuizQuestion]
@@ -122,21 +121,45 @@ class AttemptRecapResponse(BaseModel):
     questions: List[RecapQuestion]
 
 class SimilarDocument(BaseModel):
+    document_id: str
     filename: str
     uploaded_at: str
     similarity: float  # 0-1, best matching chunk pair
     overlap: float  # 0-1, fraction of the new upload's chunks that matched
 
+class DocumentInfo(BaseModel):
+    id: str
+    filename: str
+    created_at: str
+    chunk_count: int
+
+class DocumentContent(BaseModel):
+    id: str
+    filename: str
+    created_at: str
+    text_content: str
+    word_count: int
+
 class TutorStartRequest(BaseModel):
     text_content: str
     subject: str
-    max_questions: int = 10
+    # Session mode sets the mastery bar, not a question count:
+    # "vibe_check" (lighter) or "locked_in" (deeper verification).
+    mode: str = "vibe_check"
+    # When set, restrict the session to these concepts (skips topic
+    # extraction) — used by the summary's "practice these again" loop.
+    concepts: Optional[List[str]] = None
+    # Client-generated id for stage-level progress polling (GET /progress/{id}).
+    progress_id: Optional[str] = None
 
 class TutorQuestion(BaseModel):
+    # Deliberately excludes the concept name: the student shouldn't see
+    # what's being probed or predict what comes next.
     question: str
-    options: List[str]
-    concept: str
+    # Empty when answer_mode is "free_text" — the student types their answer.
+    options: List[str] = []
     difficulty: str
+    answer_mode: str = "multiple_choice"  # "multiple_choice" | "free_text"
     question_number: int
 
 class ConceptState(BaseModel):
@@ -145,16 +168,21 @@ class ConceptState(BaseModel):
     questions_asked: int
     questions_correct: int
     mastered: bool
+    parked: bool = False  # repeatedly failed rechecks; needs a re-read, not more drilling
+    resumed: bool = False  # seeded from a prior session's knowledge state
 
 class TutorStartResponse(BaseModel):
+    # No live concept states: knowledge state stays hidden until the summary.
     session_id: str
     question: TutorQuestion
-    concepts: List[ConceptState]
-    max_questions: int
+    mode: str
 
 class TutorAnswerRequest(BaseModel):
     session_id: str
     answer: str
+    # Self-reported confidence ("low" | "medium" | "high"); scales the
+    # mastery delta — confidently wrong drops harder, unsure right gains less.
+    confidence: Optional[str] = None
 
 class TutorSessionSummary(BaseModel):
     total_questions: int
@@ -162,18 +190,30 @@ class TutorSessionSummary(BaseModel):
     accuracy: float
     concepts_mastered: List[str]
     concepts_weak: List[str]
+    concepts_parked: List[str] = []
     concepts: List[ConceptState]
 
 class TutorAnswerResponse(BaseModel):
     correct: bool
+    # "correct" | "partial" | "incorrect" — free-text answers can earn
+    # partial credit (smaller mastery gain); multiple-choice never does.
+    verdict: str = "incorrect"
+    # For partial/incorrect free-text answers: what the answer missed.
+    missing: Optional[str] = None
     correct_answer: str
     explanation: Optional[str] = None
     diagnosis: Optional[str] = None  # why the wrong answer was wrong; only set on incorrect answers
-    concept: str
-    concepts: List[ConceptState]
     done: bool
+    # One-time "want to wrap up?" offer after many questions.
+    checkpoint: bool = False
     next_question: Optional[TutorQuestion] = None
     summary: Optional[TutorSessionSummary] = None
+
+class TutorWrapRequest(BaseModel):
+    session_id: str
+
+class TutorWrapResponse(BaseModel):
+    summary: TutorSessionSummary
 
 class Flashcard(BaseModel):
     front: str
@@ -190,4 +230,28 @@ class FlashcardResponse(BaseModel):
     flashcards: List[Flashcard]
     total_cards: int
     subject: str
-    card_type: str 
+    card_type: str
+
+# --- Spaced repetition (ROADMAP 4.1) ---
+
+class DueFlashcard(BaseModel):
+    id: str
+    front: str
+    back: str
+    category: Optional[str] = None
+    subject: str
+    due_at: str
+    repetitions: int
+
+class DueFlashcardsResponse(BaseModel):
+    cards: List[DueFlashcard]
+    total_due: int
+
+class FlashcardReviewRequest(BaseModel):
+    grade: str  # "again" | "hard" | "good" | "easy"
+
+class FlashcardReviewResponse(BaseModel):
+    interval_days: float
+    ease: float
+    repetitions: int
+    due_at: str 

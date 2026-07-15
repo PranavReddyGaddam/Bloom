@@ -112,10 +112,11 @@ def _find_similar_documents(user_id: str, embeddings: List[List[float]]) -> List
             entry["best_similarity"] = max(entry["best_similarity"], row["similarity"])
 
     similar = []
-    for entry in matches.values():
+    for doc_id, entry in matches.items():
         overlap = entry["matched"] / len(checked)
         if overlap >= OVERLAP_RATIO_THRESHOLD:
             similar.append({
+                "document_id": doc_id,
                 "filename": entry["filename"],
                 "uploaded_at": entry["uploaded_at"],
                 "similarity": round(entry["best_similarity"], 3),
@@ -126,10 +127,10 @@ def _find_similar_documents(user_id: str, embeddings: List[List[float]]) -> List
     return similar[:MAX_SIMILAR_DOCUMENTS]
 
 
-def _store_document(user_id: str, filename: str, chunks: List[str], embeddings: List[List[float]]) -> None:
+def _store_document(user_id: str, filename: str, chunks: List[str], embeddings: List[List[float]]) -> str:
     """Persist a document and its chunk embeddings, replacing any earlier
     upload with the same filename so re-uploads don't accumulate stale
-    copies (delete cascades to its chunks).
+    copies (delete cascades to its chunks). Returns the new document id.
     """
     client = _get_client()
 
@@ -152,26 +153,79 @@ def _store_document(user_id: str, filename: str, chunks: List[str], embeddings: 
         for index, (chunk, embedding) in enumerate(zip(chunks, embeddings))
     ]).execute()
 
+    return document_id
 
-def _remember_upload_sync(external_user_id: str, filename: str, text: str) -> List[Dict]:
+
+def _remember_upload_sync(external_user_id: str, filename: str, text: str):
     user_id = get_or_create_user(external_user_id)
 
     chunks = _chunk_text(text)
     if not chunks:
-        return []
+        return [], None
     embeddings = _embed(chunks)
 
     # Match before storing, so a re-upload of the same file is reported as
     # overlapping its earlier copy instead of silently replacing it.
     similar = _find_similar_documents(user_id, embeddings)
-    _store_document(user_id, filename, chunks, embeddings)
-    return similar
+    document_id = _store_document(user_id, filename, chunks, embeddings)
+    return similar, document_id
 
 
-async def remember_upload(external_user_id: str, filename: str, text: str) -> List[Dict]:
-    """Embed + store an upload in the user's memory and return prior
-    documents with substantial overlap. Embedding is CPU-bound, so the
-    whole pipeline runs in a worker thread. Callers should treat this as
+async def remember_upload(external_user_id: str, filename: str, text: str):
+    """Embed + store an upload in the user's memory. Returns a
+    (similar_documents, document_id) tuple: prior documents with substantial
+    overlap, and the stored document's id (so the frontend can link
+    generated artifacts back to it). Embedding is CPU-bound, so the whole
+    pipeline runs in a worker thread. Callers should treat this as
     best-effort — an exception here must never fail the upload itself.
     """
     return await asyncio.to_thread(_remember_upload_sync, external_user_id, filename, text)
+
+
+# --- Weak-concept retrieval for overlapping uploads (ROADMAP 3.2) ------------
+
+# Concept names are short phrases matched against ~1000-char passages, which
+# scores much lower than name-vs-name matching — hence a looser threshold
+# than CONCEPT_MATCH_THRESHOLD (0.85) or chunk overlap (0.80).
+WEAK_CONCEPT_SIMILARITY_THRESHOLD = 0.60
+
+# Only concepts the student actually struggles with are worth emphasizing.
+WEAK_CONCEPT_MASTERY_BELOW = 0.6
+
+MAX_WEAK_CONCEPTS = 3
+
+
+def _weak_concepts_for_text_sync(external_user_id: str, text: str) -> List[str]:
+    client = _get_client()
+    user = client.table("users").select("id").eq("external_id", external_user_id).execute()
+    if not user.data:
+        return []
+    user_id = user.data[0]["id"]
+
+    # A few chunks are enough to characterize the material's topics.
+    chunks = _chunk_text(text)[:3]
+    if not chunks:
+        return []
+
+    found: Dict[str, float] = {}  # concept -> mastery
+    for embedding in _embed(chunks):
+        rows = client.rpc("match_weak_concepts", {
+            "query_embedding": embedding,
+            "target_user_id": user_id,
+            "mastery_below": WEAK_CONCEPT_MASTERY_BELOW,
+            "match_threshold": WEAK_CONCEPT_SIMILARITY_THRESHOLD,
+            "match_count": MAX_WEAK_CONCEPTS,
+        }).execute().data or []
+        for row in rows:
+            found.setdefault(row["concept"], row["mastery"])
+
+    weakest = sorted(found.items(), key=lambda item: item[1])[:MAX_WEAK_CONCEPTS]
+    return [concept for concept, _ in weakest]
+
+
+async def weak_concepts_for_text(external_user_id: str, text: str) -> List[str]:
+    """The user's weakest stored concepts (from the tutor's cross-session
+    knowledge state) that match this text, weakest first — used as emphasis
+    hints in summary/quiz prompts when an upload overlaps prior material.
+    Best-effort, like the rest of the memory layer."""
+    return await asyncio.to_thread(_weak_concepts_for_text_sync, external_user_id, text)

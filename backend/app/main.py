@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import os
 import json
+import tempfile
 from typing import Optional, List
 from pydantic import BaseModel
 import docx
@@ -10,12 +11,13 @@ from pptx import Presentation
 from dotenv import load_dotenv
 
 from .ai_service import BloomAI
-from .models import SummaryRequest, QuizRequest, QuizResponse, SummaryResponse, FlashcardRequest, FlashcardResponse, AnswerCheckRequest, AnswerCheckResponse, AttemptBreakdownResponse, UserStatsResponse, UserAnalyticsResponse, AttemptRecapResponse, RecentAttempt, Subject, CreateSubjectRequest, TutorStartRequest, TutorStartResponse, TutorAnswerRequest, TutorAnswerResponse
+from .models import SummaryRequest, QuizRequest, QuizResponse, SummaryResponse, FlashcardRequest, FlashcardResponse, AnswerCheckRequest, AnswerCheckResponse, AttemptBreakdownResponse, UserStatsResponse, UserAnalyticsResponse, AttemptRecapResponse, RecentAttempt, Subject, CreateSubjectRequest, TutorStartRequest, TutorStartResponse, TutorAnswerRequest, TutorAnswerResponse, TutorWrapRequest, TutorWrapResponse, DocumentInfo, DocumentContent, DueFlashcard, DueFlashcardsResponse, FlashcardReviewRequest, FlashcardReviewResponse
 from . import extraction_agent
 from . import tutor_agent
 from . import memory_service
 from . import db
 from . import auth
+from . import progress
 
 # Load environment variables
 load_dotenv()
@@ -34,6 +36,10 @@ app.add_middleware(
 # Initialize AI service
 ai_service = BloomAI()
 
+@app.on_event("shutdown")
+async def shutdown():
+    await ai_service.aclose()
+
 @app.get("/")
 async def root():
     return {"message": "Bloom API is running!"}
@@ -43,41 +49,61 @@ async def health_check():
     return {"status": "healthy", "service": "Bloom API"}
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".pptx"}
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+@app.get("/progress/{progress_id}")
+async def get_progress(progress_id: str):
+    """Current stage of a long-running operation, for the frontend's
+    progress UI. The id is client-generated and passed alongside the slow
+    request; unknown ids just return a null stage (no auth needed — stages
+    are generic strings keyed by an unguessable client-side UUID)."""
+    return {"stage": progress.get_stage(progress_id)}
 
 @app.post("/upload-pdf")
-async def upload_pdf(file: UploadFile = File(...), user_id: str = Depends(auth.get_current_user_id)):
+async def upload_pdf(
+    file: UploadFile = File(...),
+    progress_id: Optional[str] = Form(None),
+    user_id: str = Depends(auth.get_current_user_id),
+):
     """Upload and extract text from a PDF, DOCX, or PPTX file"""
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Only PDF, DOCX, and PPTX files are allowed")
 
-    try:
-        # Save uploaded file temporarily
-        upload_dir = "uploads"
-        os.makedirs(upload_dir, exist_ok=True)
-        file_path = os.path.join(upload_dir, file.filename)
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (max 25 MB)")
 
-        with open(file_path, "wb") as buffer:
-            content = await file.read()
+    # Upload safety (ROADMAP 5.3): a tempfile-based path never trusts the
+    # client-supplied filename (path traversal) and can't collide between
+    # concurrent uploads of the same name. Only the sanitized extension is
+    # kept so the extractors can dispatch on it.
+    file_path = None
+    try:
+        fd, file_path = tempfile.mkstemp(suffix=ext)
+        with os.fdopen(fd, "wb") as buffer:
             buffer.write(content)
 
         # Extract text based on file type
         if ext == ".pdf":
-            text_content = await extraction_agent.extract_structured(file_path)
+            text_content = await extraction_agent.extract_structured(
+                file_path, ai_service, progress=progress.reporter(progress_id)
+            )
         elif ext == ".docx":
+            progress.report(progress_id, "Extracting text")
             text_content = extract_text_from_docx(file_path)
         else:
+            progress.report(progress_id, "Extracting text")
             text_content = extract_text_from_pptx(file_path)
-
-        # Clean up temporary file
-        os.remove(file_path)
 
         # Memory layer: store this upload in the user's vector memory and
         # surface prior uploads with substantial overlap. Best-effort — a
         # memory failure must never fail the upload itself.
+        progress.report(progress_id, "Comparing against your past uploads")
         similar_documents = []
+        document_id = None
         try:
-            similar_documents = await memory_service.remember_upload(
+            similar_documents, document_id = await memory_service.remember_upload(
                 user_id, file.filename, text_content
             )
         except Exception:
@@ -88,24 +114,49 @@ async def upload_pdf(file: UploadFile = File(...), user_id: str = Depends(auth.g
             "text_content": text_content,
             "word_count": len(text_content.split()),
             "similar_documents": similar_documents,
+            "document_id": document_id,
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+    finally:
+        progress.clear(progress_id)
+        if file_path is not None:
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+
+async def _weak_concepts_if_overlap(has_overlap: bool, user_id: str, text_content: str) -> Optional[List[str]]:
+    """ROADMAP 3.2: when the upload overlapped prior material, fetch the
+    user's weakest stored concepts that match this content, to pass to
+    generation prompts as emphasis hints. Best-effort — never fails the
+    generation itself."""
+    if not has_overlap:
+        return None
+    try:
+        return await memory_service.weak_concepts_for_text(user_id, text_content)
+    except Exception:
+        return None
 
 @app.post("/generate-summary", response_model=SummaryResponse)
 async def generate_summary(
     text_content: str = Form(...),
     summary_type: str = Form(...),  # "short", "bullet_points", "detailed"
     subject: Optional[str] = Form(None),
+    progress_id: Optional[str] = Form(None),
+    has_overlap: bool = Form(False),
     user_id: str = Depends(auth.get_current_user_id)
 ):
     """Generate summary from text content"""
     try:
+        weak_concepts = await _weak_concepts_if_overlap(has_overlap, user_id, text_content)
         summary = await ai_service.generate_summary(
             text_content=text_content,
             summary_type=summary_type,
-            subject=subject
+            subject=subject,
+            progress=progress.reporter(progress_id),
+            weak_concepts=weak_concepts,
         )
 
         if summary_type == "bullet_points" and "concepts" in summary:
@@ -128,6 +179,8 @@ async def generate_summary(
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating summary: {str(e)}")
+    finally:
+        progress.clear(progress_id)
 
 @app.post("/generate-quiz", response_model=QuizResponse)
 async def generate_quiz(
@@ -135,36 +188,34 @@ async def generate_quiz(
     num_questions: int = Form(...),
     subject: str = Form(...),
     difficulty: str = Form(...),  # "easy", "medium", "hard"
-    previous_score: Optional[int] = Form(None),
+    progress_id: Optional[str] = Form(None),
+    has_overlap: bool = Form(False),
     user_id: str = Depends(auth.get_current_user_id)
 ):
-    """Generate quiz from text content with adaptive difficulty"""
+    """Generate quiz from text content"""
     try:
-        # Adaptive difficulty logic
-        adjusted_difficulty = difficulty
-        if previous_score is not None:
-            if previous_score < 60:
-                adjusted_difficulty = "easy" if difficulty != "easy" else "easy"
-            elif previous_score > 90:
-                adjusted_difficulty = "hard" if difficulty != "hard" else "hard"
-        
+        weak_concepts = await _weak_concepts_if_overlap(has_overlap, user_id, text_content)
         quiz = await ai_service.generate_quiz(
             text_content=text_content,
             num_questions=num_questions,
             subject=subject,
-            difficulty=adjusted_difficulty
+            difficulty=difficulty,
+            progress=progress.reporter(progress_id),
+            weak_concepts=weak_concepts,
         )
-        
+
         return QuizResponse(
             questions=quiz["questions"],
             total_questions=len(quiz["questions"]),
-            difficulty=adjusted_difficulty,
+            difficulty=difficulty,
             subject=subject,
             estimated_time=len(quiz["questions"]) * 2  # 2 minutes per question
         )
-    
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating quiz: {str(e)}")
+    finally:
+        progress.clear(progress_id)
 
 @app.post("/generate-flashcards", response_model=FlashcardResponse)
 async def generate_flashcards(
@@ -172,6 +223,7 @@ async def generate_flashcards(
     num_cards: int = Form(...),
     subject: str = Form(...),
     card_type: str = Form(...),  # "definition", "concept", "fact", "mixed"
+    document_id: Optional[str] = Form(None),
     user_id: str = Depends(auth.get_current_user_id)
 ):
     """Generate flashcards from text content"""
@@ -182,16 +234,56 @@ async def generate_flashcards(
             subject=subject,
             card_type=card_type
         )
-        
+
+        # Spaced repetition (ROADMAP 4.1): persist the set so the cards come
+        # back for review at growing intervals. Best-effort — a DB failure
+        # must never fail the generation the user is waiting on.
+        try:
+            db.save_flashcard_set(
+                user_id, subject, card_type, flashcards["flashcards"],
+                document_id=document_id,
+            )
+        except Exception:
+            pass
+
         return FlashcardResponse(
             flashcards=flashcards["flashcards"],
             total_cards=len(flashcards["flashcards"]),
             subject=subject,
             card_type=card_type
         )
-    
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating flashcards: {str(e)}")
+
+@app.get("/me/flashcards/due", response_model=DueFlashcardsResponse)
+async def get_my_due_flashcards(external_user_id: str = Depends(auth.get_current_user_id)):
+    """Cards due for review now (most overdue first) plus the total due
+    count, for the review screen and the due-count badge"""
+    try:
+        return DueFlashcardsResponse(**db.get_due_flashcards(external_user_id))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching due flashcards: {str(e)}")
+
+@app.post("/flashcards/{card_id}/review", response_model=FlashcardReviewResponse)
+async def review_flashcard(
+    card_id: str,
+    request: FlashcardReviewRequest,
+    external_user_id: str = Depends(auth.get_current_user_id),
+):
+    """Apply one self-graded review ("again"/"hard"/"good"/"easy") to a card
+    and return its new schedule"""
+    if request.grade not in ("again", "hard", "good", "easy"):
+        raise HTTPException(status_code=400, detail="grade must be one of: again, hard, good, easy")
+    try:
+        result = db.review_flashcard(card_id, external_user_id, request.grade)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Flashcard not found")
+        return FlashcardReviewResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error recording review: {str(e)}")
 
 @app.post("/tutor/start", response_model=TutorStartResponse)
 async def tutor_start(request: TutorStartRequest, user_id: str = Depends(auth.get_current_user_id)):
@@ -201,17 +293,21 @@ async def tutor_start(request: TutorStartRequest, user_id: str = Depends(auth.ge
     try:
         if not request.text_content.strip():
             raise HTTPException(status_code=400, detail="text_content cannot be empty")
-        if not 1 <= request.max_questions <= 30:
-            raise HTTPException(status_code=400, detail="max_questions must be between 1 and 30")
+        if request.mode not in tutor_agent.MODES:
+            raise HTTPException(status_code=400, detail="mode must be one of: " + ", ".join(tutor_agent.MODES))
 
         result = await tutor_agent.start_session(
-            user_id, request.text_content, request.subject, request.max_questions, ai_service
+            user_id, request.text_content, request.subject, request.mode, ai_service,
+            concepts_filter=request.concepts,
+            progress=progress.reporter(request.progress_id),
         )
         return TutorStartResponse(**result)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error starting tutor session: {str(e)}")
+    finally:
+        progress.clear(request.progress_id)
 
 @app.post("/tutor/answer", response_model=TutorAnswerResponse)
 async def tutor_answer(request: TutorAnswerRequest, user_id: str = Depends(auth.get_current_user_id)):
@@ -220,7 +316,10 @@ async def tutor_answer(request: TutorAnswerRequest, user_id: str = Depends(auth.
     question (targeting the weakest concept at a calibrated difficulty) or
     the session summary."""
     try:
-        result = await tutor_agent.submit_answer(request.session_id, user_id, request.answer, ai_service)
+        result = await tutor_agent.submit_answer(
+            request.session_id, user_id, request.answer, ai_service,
+            confidence=request.confidence,
+        )
         if result is None:
             raise HTTPException(status_code=404, detail="Tutor session not found or expired")
         return TutorAnswerResponse(**result)
@@ -228,6 +327,63 @@ async def tutor_answer(request: TutorAnswerRequest, user_id: str = Depends(auth.
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing answer: {str(e)}")
+
+@app.post("/tutor/wrap", response_model=TutorWrapResponse)
+async def tutor_wrap(request: TutorWrapRequest, user_id: str = Depends(auth.get_current_user_id)):
+    """End an active tutor session early at the student's request (the
+    soft-checkpoint "wrap up" action) and return its summary."""
+    try:
+        summary = tutor_agent.wrap_session(request.session_id, user_id)
+        if summary is None:
+            raise HTTPException(status_code=404, detail="Tutor session not found or expired")
+        return TutorWrapResponse(summary=summary)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error wrapping tutor session: {str(e)}")
+
+@app.get("/tutor/session/{session_id}", response_model=TutorStartResponse)
+async def tutor_get_session(session_id: str, user_id: str = Depends(auth.get_current_user_id)):
+    """Current state of an active tutor session, for resuming the UI after a
+    page refresh: the pending question (answer stays server-side) and the
+    per-concept knowledge state."""
+    state = tutor_agent.get_session_state(session_id, user_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Tutor session not found or already finished")
+    return TutorStartResponse(**state)
+
+# --- Documents library (ROADMAP 3.1): the memory layer's stored uploads,
+# --- made user-visible so material can be re-studied without re-uploading.
+
+@app.get("/me/documents", response_model=List[DocumentInfo])
+async def get_my_documents(external_user_id: str = Depends(auth.get_current_user_id)):
+    """All of the signed-in user's stored uploads, newest first"""
+    try:
+        documents = db.list_documents(external_user_id)
+        return [DocumentInfo(**d) for d in documents]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching documents: {str(e)}")
+
+@app.get("/documents/{document_id}/content", response_model=DocumentContent)
+async def get_document_content(document_id: str, external_user_id: str = Depends(auth.get_current_user_id)):
+    """Reassembled text of a stored upload, for studying it again"""
+    content = db.get_document_content(document_id, external_user_id)
+    if content is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return DocumentContent(**content)
+
+@app.delete("/documents/{document_id}")
+async def delete_document(document_id: str, external_user_id: str = Depends(auth.get_current_user_id)):
+    """Delete a stored upload and its chunks (ownership-scoped)"""
+    try:
+        deleted = db.delete_document(document_id, external_user_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Document not found")
+        return {"deleted": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error deleting document: {str(e)}")
 
 @app.post("/subjects", response_model=Subject)
 async def create_subject(request: CreateSubjectRequest, external_user_id: str = Depends(auth.get_current_user_id)):
