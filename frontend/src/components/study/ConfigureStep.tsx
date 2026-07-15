@@ -8,14 +8,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
 import { StudyFormData, SummaryType, Difficulty, Subject, FlashcardResponse, SimilarDocument, TutorMode } from '@/types'
-import { ArrowLeft, RotateCcw, BookOpen, PencilLine, GraduationCap, X, ArrowRight, History } from 'lucide-react'
+import { ArrowLeft, RotateCcw, BookOpen, PencilLine, GraduationCap, X, ArrowRight, History, Target } from 'lucide-react'
 import { SubjectSelect } from './SubjectSelect'
 import { FlashcardCarousel } from './FlashcardCarousel'
 
 const LIME = 'text-[#D7FF3D]'
 const LIME_BG = 'bg-[#D7FF3D]'
 
-type StudyMode = 'flashcards' | 'quiz' | 'tutor'
+type StudyMode = 'flashcards' | 'quiz' | 'tutor' | 'pretest'
 
 interface ConfigureStepProps {
   formData: StudyFormData
@@ -30,6 +30,7 @@ interface ConfigureStepProps {
   handleGenerate: () => void
   handleGenerateFlashcards: () => void
   handleStartTutor: () => void
+  handleStartPretest: () => void
   // Switches the active material to an overlapping prior upload.
   onOpenDocument: (documentId: string) => Promise<void>
   setCurrentStep: (step: 'upload' | 'configure' | 'results' | 'tutor') => void
@@ -47,6 +48,7 @@ export function ConfigureStep({
   handleGenerate,
   handleGenerateFlashcards,
   handleStartTutor,
+  handleStartPretest,
   onOpenDocument,
   setCurrentStep,
   resetApp
@@ -196,7 +198,13 @@ export function ConfigureStep({
         )}
 
         {/* Mode Selection */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+          {modeCard(
+            'pretest',
+            <Target className="h-8 w-8" />,
+            'Test me first',
+            'A short pretest before you read — even wrong guesses prime you to retain the material'
+          )}
           {modeCard(
             'flashcards',
             <BookOpen className="h-8 w-8" />,
@@ -370,6 +378,59 @@ export function ConfigureStep({
                     </>
                   ) : (
                     'Generate Quiz'
+                  )}
+                </Button>
+              </div>
+            </>
+          ) : mode === 'pretest' ? (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <SubjectSelect
+                  subjectId={formData.subjectId}
+                  onSelect={(subject: Subject) =>
+                    setFormData(prev => ({ ...prev, subjectId: subject.id, subjectName: subject.name }))
+                  }
+                />
+
+                <div className="space-y-2">
+                  <Label className="text-sm font-medium text-white/70">Summary Format (shown after)</Label>
+                  <Select
+                    value={formData.summaryType}
+                    onValueChange={(value: SummaryType) =>
+                      setFormData(prev => ({ ...prev, summaryType: value }))
+                    }
+                  >
+                    <SelectTrigger className="bg-white/5 border-white/20 text-white">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="bg-[#0d1230] border-white/15 text-white">
+                      <SelectItem value="short">Short (2-3 paragraphs)</SelectItem>
+                      <SelectItem value="bullet_points">Bullet Points</SelectItem>
+                      <SelectItem value="detailed">Detailed Summary</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <p className="text-sm text-white/50 mt-6">
+                3-5 quick questions on the key concepts, before you see any summary. Testing yourself
+                first — even failing — measurably improves what you retain from reading afterwards, and
+                the summary will flag exactly the spots you missed.
+              </p>
+
+              <div className="flex justify-end mt-8">
+                <Button
+                  onClick={handleStartPretest}
+                  disabled={loading || !formData.subjectName}
+                  className={`${LIME_BG} text-black hover:bg-[#c2e836]`}
+                >
+                  {loading ? (
+                    <>
+                      <div className="animate-spin h-4 w-4 mr-2 border-2 border-black/60 border-t-transparent rounded-full" />
+                      {progressStage || 'Preparing your pretest...'}
+                    </>
+                  ) : (
+                    'Start Pretest'
                   )}
                 </Button>
               </div>

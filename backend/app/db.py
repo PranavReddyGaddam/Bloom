@@ -809,7 +809,10 @@ def match_concept_mastery(external_id: str, embedding: List[float]) -> Optional[
     return rows[0] if rows else None
 
 
-def create_concept_mastery(external_id: str, concept: str, embedding: List[float], mastery: float) -> str:
+def create_concept_mastery(
+    external_id: str, concept: str, embedding: List[float], mastery: float,
+    document_id: Optional[str] = None, subject: Optional[str] = None,
+) -> str:
     """First sighting of a concept for this user — insert and return the row id."""
     client = _get_client()
     user_id = get_or_create_user(external_id)
@@ -818,8 +821,24 @@ def create_concept_mastery(external_id: str, concept: str, embedding: List[float
         "concept": concept,
         "embedding": embedding,
         "mastery": mastery,
+        "document_id": document_id,
+        "subject": subject,
     }).execute()
     return created.data[0]["id"]
+
+
+def set_concept_source(row_id: str, document_id: Optional[str], subject: Optional[str]) -> None:
+    """Remember where a concept was (most recently) studied, so a due review
+    can reopen that document's stored content for a refresher."""
+    updates = {}
+    if document_id:
+        updates["document_id"] = document_id
+    if subject:
+        updates["subject"] = subject
+    if not updates:
+        return
+    client = _get_client()
+    client.table("concept_mastery").update(updates).eq("id", row_id).execute()
 
 
 def update_concept_mastery(row_id: str, mastery: float, questions_asked: int, questions_correct: int) -> None:
@@ -831,6 +850,113 @@ def update_concept_mastery(row_id: str, mastery: float, questions_asked: int, qu
         "questions_correct": questions_correct,
         "last_seen_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", row_id).execute()
+
+
+def update_concept_calibration(
+    row_id: str, high_answered: int, high_correct: int, low_answered: int, low_correct: int,
+) -> None:
+    """Lifetime (confidence, correctness) counters (ROADMAP_LEARNING 5).
+    Kept separate from update_concept_mastery so a not-yet-migrated
+    concept_mastery table can't block the mastery write."""
+    client = _get_client()
+    client.table("concept_mastery").update({
+        "conf_high_asked": high_answered,
+        "conf_high_correct": high_correct,
+        "conf_low_asked": low_answered,
+        "conf_low_correct": low_correct,
+    }).eq("id", row_id).execute()
+
+
+# --- Spaced repetition for concepts (ROADMAP_LEARNING 6) ----------------------
+# Concepts decay like flashcards do. Every finished tutor session reschedules
+# each probed concept: a session that confirms the concept (cleared the mode's
+# mastery bar) grows the interval SM-2-style; a session that finds it weak
+# resets it to a short relearning step.
+
+CONCEPT_REVIEW_FIRST_DAYS = 3.0
+CONCEPT_REVIEW_GROWTH = 2.2
+CONCEPT_REVIEW_MAX_DAYS = 90.0
+CONCEPT_RELEARN_DAYS = 1.0
+
+
+def schedule_concept_review(row_id: str, confirmed: bool) -> None:
+    """Reschedule one concept's next review after a finished session."""
+    client = _get_client()
+    rows = (
+        client.table("concept_mastery")
+        .select("review_interval_days, review_count")
+        .eq("id", row_id)
+        .execute()
+        .data
+    )
+    if not rows:
+        return
+    row = rows[0]
+
+    if confirmed:
+        if row["review_count"] == 0 or row["review_interval_days"] <= 0:
+            interval = CONCEPT_REVIEW_FIRST_DAYS
+        else:
+            interval = min(CONCEPT_REVIEW_MAX_DAYS, row["review_interval_days"] * CONCEPT_REVIEW_GROWTH)
+        review_count = row["review_count"] + 1
+    else:
+        interval = CONCEPT_RELEARN_DAYS
+        review_count = 0
+
+    due_at = datetime.now(timezone.utc) + timedelta(days=interval)
+    client.table("concept_mastery").update({
+        "review_interval_days": interval,
+        "review_count": review_count,
+        "review_due_at": due_at.isoformat(),
+    }).eq("id", row_id).execute()
+
+
+def get_due_concept_reviews(external_id: str, limit: int = 3) -> Dict:
+    """Concepts whose review schedule says they're due (most overdue first),
+    with their source document so one click can start a refresher. Concepts
+    whose source document was deleted are skipped — there is no stored
+    content to refresh from."""
+    client = _get_client()
+
+    user = client.table("users").select("id").eq("external_id", external_id).execute()
+    if not user.data:
+        return {"concepts": [], "total_due": 0}
+    user_id = user.data[0]["id"]
+
+    now = datetime.now(timezone.utc)
+    result = (
+        client.table("concept_mastery")
+        .select("id, concept, mastery, subject, document_id, last_seen_at, review_due_at, documents(filename)", count="exact")
+        .eq("user_id", user_id)
+        .lte("review_due_at", now.isoformat())
+        .not_.is_("document_id", "null")
+        .order("review_due_at")
+        .limit(limit)
+        .execute()
+    )
+
+    concepts = []
+    for row in result.data:
+        last_seen = row.get("last_seen_at")
+        days_since = None
+        if last_seen:
+            try:
+                seen_dt = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
+                days_since = max(0, (now - seen_dt).days)
+            except ValueError:
+                pass
+        concepts.append({
+            "id": row["id"],
+            "concept": row["concept"],
+            "mastery": row["mastery"],
+            "subject": row.get("subject"),
+            "document_id": row["document_id"],
+            "document_filename": (row.get("documents") or {}).get("filename"),
+            "last_seen_at": last_seen,
+            "review_due_at": row["review_due_at"],
+            "days_since_seen": days_since,
+        })
+    return {"concepts": concepts, "total_due": result.count if result.count is not None else len(concepts)}
 
 
 def record_misconception(external_id: str, concept_mastery_id: str, concept: str, misconception: str) -> None:

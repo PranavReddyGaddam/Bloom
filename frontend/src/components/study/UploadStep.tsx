@@ -19,6 +19,8 @@ import {
 } from 'lucide-react'
 import { DocumentLibrary } from './DocumentLibrary'
 import { ReviewDeck } from './ReviewDeck'
+import { ConceptReviewBanner } from './ConceptReviewBanner'
+import { DueConceptReview } from '@/types'
 
 const LIME = 'text-[#D7FF3D]'
 
@@ -35,6 +37,9 @@ interface UploadStepProps {
   resetApp: () => void
   // Makes a stored upload the active material ("study this again").
   onOpenDocument: (documentId: string) => Promise<void>
+  // Starts a short concept-filtered tutor session on a due concept's
+  // source document (concept spaced repetition).
+  onStartRefresher: (review: DueConceptReview) => Promise<void>
 }
 
 export function UploadStep({
@@ -46,7 +51,8 @@ export function UploadStep({
   handleFileUpload,
   removeFile,
   resetApp,
-  onOpenDocument
+  onOpenDocument,
+  onStartRefresher
 }: UploadStepProps) {
   const router = useRouter()
 
@@ -175,6 +181,10 @@ export function UploadStep({
 
         {/* Spaced repetition: cards due for review greet returning users */}
         <ReviewDeck />
+
+        {/* Concept spaced repetition: mastered concepts come back as
+            one-click tutor refreshers when their review interval lapses */}
+        <ConceptReviewBanner onStartRefresher={onStartRefresher} />
 
         {/* Documents library: past uploads, re-studiable without the file */}
         <DocumentLibrary onOpen={onOpenDocument} />

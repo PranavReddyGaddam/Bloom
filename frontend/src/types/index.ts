@@ -171,6 +171,59 @@ export interface FlashcardReviewResponse {
   due_at: string;
 }
 
+// Spaced repetition for concepts: a concept whose review schedule says it's
+// due, with its source document so one click can start a refresher.
+export interface DueConceptReview {
+  id: string;
+  concept: string;
+  mastery: number;
+  subject?: string | null;
+  document_id: string;
+  document_filename?: string | null;
+  last_seen_at?: string | null;
+  review_due_at: string;
+  days_since_seen?: number | null;
+}
+
+export interface DueConceptReviewsResponse {
+  concepts: DueConceptReview[];
+  total_due: number;
+}
+
+// Pretesting (retrieval before re-reading): a short quiz taken before the
+// summary is shown; results calibrate concept mastery and flag weak spots.
+export interface PretestQuestion {
+  // No concept name and no answer: a blind first probe, graded server-side.
+  question: string;
+  options: string[];
+  question_number: number;
+}
+
+export interface PretestStartResponse {
+  pretest_id: string;
+  questions: PretestQuestion[];
+  total_questions: number;
+}
+
+export interface PretestQuestionResult {
+  question: string;
+  options: string[];
+  user_answer: string;
+  correct_answer: string;
+  correct: boolean;
+  explanation?: string | null;
+  concept: string;
+  question_number: number;
+}
+
+export interface PretestSubmitResponse {
+  results: PretestQuestionResult[];
+  correct_answers: number;
+  total_questions: number;
+  // Concepts with at least one wrong answer — flagged in the summary.
+  missed_concepts: string[];
+}
+
 // Sets the session's mastery bar, not a question count.
 export type TutorMode = 'vibe_check' | 'locked_in';
 
@@ -201,6 +254,27 @@ export interface TutorStartResponse {
   mode: TutorMode;
 }
 
+export interface ConfidenceBucket {
+  confidence: 'low' | 'medium' | 'high';
+  answered: number;
+  correct: number;
+}
+
+// One concept's answers at the flagged confidence level (high for
+// overconfident entries, low for underconfident ones).
+export interface ConceptCalibration {
+  concept: string;
+  answered: number;
+  correct: number;
+}
+
+// Calibration feedback: how self-reported confidence lined up with results.
+export interface SessionCalibration {
+  by_confidence: ConfidenceBucket[];
+  overconfident: ConceptCalibration[];   // said "certain", got it wrong
+  underconfident: ConceptCalibration[];  // said "not sure", got it right
+}
+
 export interface TutorSessionSummary {
   total_questions: number;
   correct_answers: number;
@@ -209,6 +283,8 @@ export interface TutorSessionSummary {
   concepts_weak: string[];
   concepts_parked?: string[];
   concepts: ConceptState[];
+  // Null when every answer used the default confidence — no signal.
+  calibration?: SessionCalibration | null;
 }
 
 export interface TutorAnswerResponse {

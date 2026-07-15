@@ -12,12 +12,15 @@ import {
   StudyFormData,
   Difficulty,
   SimilarDocument,
-  TutorStartResponse
+  TutorStartResponse,
+  PretestStartResponse,
+  DueConceptReview
 } from '@/types'
 import { UploadStep } from '@/components/study/UploadStep'
 import { ConfigureStep } from '@/components/study/ConfigureStep'
 import { ResultsStep } from '@/components/study/ResultsStep'
 import { TutorView } from '@/components/study/TutorView'
+import { PretestView } from '@/components/study/PretestView'
 
 interface BloomAppProps {
   initialStep?: 'upload' | 'configure' | 'results'
@@ -112,8 +115,12 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
   const [flashcards, setFlashcards] = useState<FlashcardResponse | null>(null)
   const [quizResult, setQuizResult] = useState<QuizResult | null>(null)
   const [userAnswers, setUserAnswers] = useState<UserAnswer[]>([])
-  const [currentStep, setCurrentStep] = useState<'upload' | 'configure' | 'results' | 'tutor'>(initialStep)
+  const [currentStep, setCurrentStep] = useState<'upload' | 'configure' | 'results' | 'tutor' | 'pretest'>(initialStep)
   const [tutorSession, setTutorSession] = useState<TutorStartResponse | null>(null)
+  // Pretesting: the active pretest and, after grading, the missed concepts
+  // to emphasize during generation and flag in the summary view.
+  const [pretest, setPretest] = useState<PretestStartResponse | null>(null)
+  const [pretestFocus, setPretestFocus] = useState<string[]>([])
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
 
   // Form data
@@ -165,13 +172,14 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     }
   }, [router, pollProgress])
 
-  const handleGenerate = useCallback(async () => {
+  const handleGenerate = useCallback(async (focusConcepts?: string[]) => {
     if (!textContent) {
       return
     }
 
     setLoading(true)
     setError('')
+    setPretestFocus(focusConcepts ?? [])
 
     // Both generations report progress under one id — the latest stage from
     // either pipeline is what the user sees.
@@ -181,7 +189,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     try {
       // Generate summary and quiz in parallel
       const [summaryResult, quizResult] = await Promise.all([
-        api.generateSummary(textContent, formData.summaryType, formData.subjectName, progressId, hasOverlap),
+        api.generateSummary(textContent, formData.summaryType, formData.subjectName, progressId, hasOverlap, focusConcepts),
         api.generateQuiz(
           textContent,
           formData.numQuestions,
@@ -248,7 +256,8 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
         formData.subjectName,
         formData.tutorMode,
         undefined,
-        progressId
+        progressId,
+        documentId
       )
       setTutorSession(session)
       sessionStorage.setItem(TUTOR_SESSION_KEY, JSON.stringify({
@@ -262,7 +271,36 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
       stopPolling()
       setLoading(false)
     }
+  }, [textContent, formData, pollProgress, documentId])
+
+  // Pretesting: a short quiz before any summary is shown. Grading writes
+  // into the persistent concept mastery server-side, so tutor sessions
+  // started afterwards begin calibrated instead of at the 0.5 midpoint.
+  const handleStartPretest = useCallback(async () => {
+    if (!textContent || !formData.subjectName) return
+
+    setLoading(true)
+    setError('')
+
+    const progressId = crypto.randomUUID()
+    const stopPolling = pollProgress(progressId)
+    try {
+      const result = await api.startPretest(textContent, formData.subjectName, progressId, documentId)
+      setPretest(result)
+      setPretestFocus([])
+      setCurrentStep('pretest')
+    } catch (err) {
+      setError(err instanceof APIError ? err.message : 'Failed to start pretest')
+    } finally {
+      stopPolling()
+      setLoading(false)
+    }
   }, [textContent, formData, pollProgress])
+
+  const handleSubmitPretest = useCallback(async (answers: string[]) => {
+    if (!pretest) throw new APIError('No active pretest')
+    return api.submitPretest(pretest.pretest_id, answers)
+  }, [pretest])
 
   const handlePracticeConcepts = useCallback(async (concepts: string[]) => {
     if (!textContent || !formData.subjectName) return
@@ -270,14 +308,50 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
       textContent,
       formData.subjectName,
       formData.tutorMode,
-      concepts
+      concepts,
+      undefined,
+      documentId
     )
     setTutorSession(session)
     sessionStorage.setItem(TUTOR_SESSION_KEY, JSON.stringify({
       id: session.session_id,
       subjectName: formData.subjectName,
     }))
-  }, [textContent, formData])
+  }, [textContent, formData, documentId])
+
+  // Concept spaced repetition: one click on a due concept re-opens its
+  // source document from the library and starts a short tutor session
+  // restricted to that concept. The refresher's results update the
+  // concept's mastery and reschedule its next review server-side.
+  const handleStartRefresher = useCallback(async (review: DueConceptReview) => {
+    const content = await api.getDocumentContent(review.document_id)
+    const subjectName = review.subject || review.concept
+    setFile({ name: content.filename, size: 0 })
+    setTextContent(content.text_content)
+    setDocumentId(content.id)
+    setSimilarDocuments([])
+    localStorage.setItem(STORED_FILE_KEY, JSON.stringify({
+      name: content.filename,
+      size: 0,
+      textContent: content.text_content,
+      documentId: content.id
+    }))
+    setFormData(prev => ({ ...prev, subjectName }))
+    const session = await api.startTutorSession(
+      content.text_content,
+      subjectName,
+      'vibe_check',
+      [review.concept],
+      undefined,
+      content.id
+    )
+    setTutorSession(session)
+    sessionStorage.setItem(TUTOR_SESSION_KEY, JSON.stringify({
+      id: session.session_id,
+      subjectName,
+    }))
+    setCurrentStep('tutor')
+  }, [])
 
   // Documents library: make a stored upload the active study material —
   // "study this again" without re-uploading the file.
@@ -353,6 +427,8 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     setQuizResult(null)
     setUserAnswers([])
     setTutorSession(null)
+    setPretest(null)
+    setPretestFocus([])
     sessionStorage.removeItem(TUTOR_SESSION_KEY)
     setCurrentStep('upload')
     setError('')
@@ -373,6 +449,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
         removeFile={removeFile}
         resetApp={resetApp}
         onOpenDocument={handleOpenDocument}
+        onStartRefresher={handleStartRefresher}
       />
     )
   } else if (currentStep === 'configure') {
@@ -385,13 +462,37 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
         progressStage={progressStage}
         similarDocuments={similarDocuments}
         flashcards={flashcards}
-        handleGenerate={handleGenerate}
+        handleGenerate={() => handleGenerate()}
         handleGenerateFlashcards={handleGenerateFlashcards}
         handleStartTutor={handleStartTutor}
+        handleStartPretest={handleStartPretest}
         onOpenDocument={handleOpenDocument}
         setCurrentStep={setCurrentStep}
         resetApp={resetApp}
       />
+    )
+  } else if (currentStep === 'pretest' && pretest) {
+    return (
+      <main className="relative z-10 max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+        <div className="text-center mb-10">
+          <h1 className="font-serif text-4xl sm:text-5xl font-light text-white mb-4">
+            Test <span className="italic text-[#D7FF3D]">first</span>, then read
+          </h1>
+          <p className="text-lg text-white/60 font-sans font-light">
+            Answer before studying — even wrong guesses make what you read next stick better
+          </p>
+        </div>
+        <PretestView
+          key={pretest.pretest_id}
+          pretest={pretest}
+          onSubmit={handleSubmitPretest}
+          onContinue={(missedConcepts) => handleGenerate(missedConcepts)}
+          onStartTutor={handleStartTutor}
+          onBack={() => setCurrentStep('configure')}
+          loading={loading}
+          progressStage={progressStage}
+        />
+      </main>
     )
   } else if (currentStep === 'tutor' && tutorSession) {
     return (
@@ -422,6 +523,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     return (
       <ResultsStep
         summary={summary}
+        flaggedConcepts={pretestFocus}
         quiz={quiz}
         quizResult={quizResult}
         userAnswers={userAnswers}

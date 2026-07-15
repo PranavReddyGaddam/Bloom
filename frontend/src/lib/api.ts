@@ -22,7 +22,10 @@ import {
   DocumentContent,
   DueFlashcardsResponse,
   FlashcardReviewResponse,
-  ReviewGrade
+  ReviewGrade,
+  PretestStartResponse,
+  PretestSubmitResponse,
+  DueConceptReviewsResponse
 } from '@/types';
 import { createClient } from '@/lib/supabase/client';
 
@@ -79,7 +82,8 @@ export const api = {
     summaryType: SummaryType,
     subject?: string,
     progressId?: string,
-    hasOverlap?: boolean
+    hasOverlap?: boolean,
+    focusConcepts?: string[]
   ): Promise<SummaryResponse> {
     const formData = new FormData();
     formData.append('text_content', textContent);
@@ -92,6 +96,11 @@ export const api = {
     }
     if (hasOverlap) {
       formData.append('has_overlap', 'true');
+    }
+    // Pretest-informed emphasis: concepts the user just missed get extra
+    // coverage in the generated summary.
+    if (focusConcepts && focusConcepts.length > 0) {
+      formData.append('focus_concepts', JSON.stringify(focusConcepts));
     }
 
     const response = await fetch(`${API_BASE_URL}/generate-summary`, {
@@ -272,12 +281,55 @@ export const api = {
     }
   },
 
+  // --- Pretesting (retrieval before re-reading) ---
+
+  async startPretest(
+    textContent: string,
+    subject: string,
+    progressId?: string,
+    documentId?: string | null
+  ): Promise<PretestStartResponse> {
+    const response = await fetch(`${API_BASE_URL}/pretest/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+      body: JSON.stringify({
+        text_content: textContent,
+        subject,
+        ...(progressId ? { progress_id: progressId } : {}),
+        ...(documentId ? { document_id: documentId } : {}),
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to start pretest: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  async submitPretest(pretestId: string, answers: string[]): Promise<PretestSubmitResponse> {
+    const response = await fetch(`${API_BASE_URL}/pretest/submit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+      body: JSON.stringify({ pretest_id: pretestId, answers }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to submit pretest: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
   async startTutorSession(
     textContent: string,
     subject: string,
     mode: TutorMode,
     concepts?: string[],
-    progressId?: string
+    progressId?: string,
+    documentId?: string | null
   ): Promise<TutorStartResponse> {
     const response = await fetch(`${API_BASE_URL}/tutor/start`, {
       method: 'POST',
@@ -288,6 +340,7 @@ export const api = {
         mode,
         ...(concepts && concepts.length > 0 ? { concepts } : {}),
         ...(progressId ? { progress_id: progressId } : {}),
+        ...(documentId ? { document_id: documentId } : {}),
       }),
     });
 
@@ -433,6 +486,21 @@ export const api = {
     if (!response.ok) {
       const error = await response.text();
       throw new APIError(`Failed to fetch due flashcards: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  // Concepts whose spaced-review schedule says they're due, for the
+  // refresher banner on the upload page.
+  async getDueConcepts(): Promise<DueConceptReviewsResponse> {
+    const response = await fetch(`${API_BASE_URL}/me/concepts/due`, {
+      headers: await authHeaders(),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to fetch due concepts: ${error}`, response.status);
     }
 
     return response.json();

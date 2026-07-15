@@ -149,6 +149,9 @@ class TutorStartRequest(BaseModel):
     # When set, restrict the session to these concepts (skips topic
     # extraction) — used by the summary's "practice these again" loop.
     concepts: Optional[List[str]] = None
+    # Library id of the material, so this session's concepts remember their
+    # source document (concept spaced repetition needs it for refreshers).
+    document_id: Optional[str] = None
     # Client-generated id for stage-level progress polling (GET /progress/{id}).
     progress_id: Optional[str] = None
 
@@ -184,6 +187,25 @@ class TutorAnswerRequest(BaseModel):
     # mastery delta — confidently wrong drops harder, unsure right gains less.
     confidence: Optional[str] = None
 
+class ConfidenceBucket(BaseModel):
+    confidence: str  # "low" | "medium" | "high"
+    answered: int
+    correct: int
+
+class ConceptCalibration(BaseModel):
+    # One concept's answers at the flagged confidence level: overconfident
+    # entries count answers said with high confidence, underconfident entries
+    # answers said with low confidence.
+    concept: str
+    answered: int
+    correct: int
+
+class SessionCalibration(BaseModel):
+    # Calibration feedback (ROADMAP_LEARNING 5): predicted vs. actual.
+    by_confidence: List[ConfidenceBucket]
+    overconfident: List[ConceptCalibration]   # said "certain", got it wrong
+    underconfident: List[ConceptCalibration]  # said "not sure", got it right
+
 class TutorSessionSummary(BaseModel):
     total_questions: int
     correct_answers: int
@@ -192,6 +214,9 @@ class TutorSessionSummary(BaseModel):
     concepts_weak: List[str]
     concepts_parked: List[str] = []
     concepts: List[ConceptState]
+    # None when the student never moved the confidence selector off the
+    # default — all-medium data says nothing about calibration.
+    calibration: Optional[SessionCalibration] = None
 
 class TutorAnswerResponse(BaseModel):
     correct: bool
@@ -214,6 +239,68 @@ class TutorWrapRequest(BaseModel):
 
 class TutorWrapResponse(BaseModel):
     summary: TutorSessionSummary
+
+# --- Spaced repetition for concepts (ROADMAP_LEARNING 6) ---
+
+class DueConceptReview(BaseModel):
+    id: str
+    concept: str
+    mastery: float
+    subject: Optional[str] = None
+    document_id: str
+    document_filename: Optional[str] = None
+    last_seen_at: Optional[str] = None
+    review_due_at: str
+    days_since_seen: Optional[int] = None
+
+class DueConceptReviewsResponse(BaseModel):
+    concepts: List[DueConceptReview]
+    total_due: int
+
+# --- Pretesting (ROADMAP_LEARNING 1) ---
+
+class PretestStartRequest(BaseModel):
+    text_content: str
+    subject: str
+    # Library id of the material, so pretested concepts remember their source
+    # document (concept spaced repetition needs it for refreshers).
+    document_id: Optional[str] = None
+    # Client-generated id for stage-level progress polling (GET /progress/{id}).
+    progress_id: Optional[str] = None
+
+class PretestQuestion(BaseModel):
+    # No concept name and no answer: a blind first probe, graded server-side.
+    question: str
+    options: List[str]
+    question_number: int
+
+class PretestStartResponse(BaseModel):
+    pretest_id: str
+    questions: List[PretestQuestion]
+    total_questions: int
+
+class PretestSubmitRequest(BaseModel):
+    pretest_id: str
+    # One answer per question, in question order.
+    answers: List[str]
+
+class PretestQuestionResult(BaseModel):
+    question: str
+    options: List[str]
+    user_answer: str
+    correct_answer: str
+    correct: bool
+    explanation: Optional[str] = None
+    concept: str
+    question_number: int
+
+class PretestSubmitResponse(BaseModel):
+    results: List[PretestQuestionResult]
+    correct_answers: int
+    total_questions: int
+    # Concepts with at least one wrong answer — flagged in the summary shown
+    # next ("pay attention to these").
+    missed_concepts: List[str]
 
 class Flashcard(BaseModel):
     front: str

@@ -77,6 +77,17 @@ CONFIDENCE_MULTIPLIER = {
     "high": {"correct": 1.2, "wrong": 1.4},
 }
 
+# Calibration feedback (ROADMAP_LEARNING 5): confidence doesn't just scale
+# the mastery delta — (confidence, correctness) pairs are tracked per concept
+# and shown back in the summary. One confidently-wrong answer is already a
+# miscalibration signal (the multiplier treats it as strong evidence), but an
+# unsure-yet-right answer can be a lucky multiple-choice guess, so flagging
+# underconfidence requires more than one.
+CALIBRATION_LEVELS = ("low", "medium", "high")
+OVERCONFIDENT_MIN_WRONG = 1
+UNDERCONFIDENT_MIN_CORRECT = 2
+CALIBRATION_TOP_N = 3
+
 # Session modes: the bar a concept must clear, not a question count.
 MODES = {
     "vibe_check": {
@@ -150,6 +161,10 @@ def _fresh_concept_state() -> Dict:
         "hard_variant_passed": False,
         "parked": False,
         "last_correct": None,
+        # This session's (confidence, correctness) pairs, keyed by level:
+        # {"high": {"answered": n, "correct": n}, ...}. Lives inside the
+        # concept state so it persists with the tutor_sessions concepts jsonb.
+        "calibration": {},
     }
 
 
@@ -214,6 +229,43 @@ def _public_question(question: Dict, question_number: int) -> Dict:
     }
 
 
+def _calibration(session: Dict) -> Optional[Dict]:
+    """Calibration readout for the summary: how confidence lined up with
+    correctness, and the concepts where they diverged most in each direction.
+    Returns None when every answer used the default "medium" — data the
+    student never varied says nothing about their calibration.
+    """
+    buckets = {level: {"answered": 0, "correct": 0} for level in CALIBRATION_LEVELS}
+    overconfident: List[Dict] = []
+    underconfident: List[Dict] = []
+    for name, state in session["concepts"].items():
+        cal = state.get("calibration") or {}
+        for level, counts in cal.items():
+            if level in buckets:
+                buckets[level]["answered"] += counts["answered"]
+                buckets[level]["correct"] += counts["correct"]
+        high = cal.get("high", {"answered": 0, "correct": 0})
+        low = cal.get("low", {"answered": 0, "correct": 0})
+        if high["answered"] - high["correct"] >= OVERCONFIDENT_MIN_WRONG:
+            overconfident.append({"concept": name, "answered": high["answered"], "correct": high["correct"]})
+        if low["correct"] >= UNDERCONFIDENT_MIN_CORRECT:
+            underconfident.append({"concept": name, "answered": low["answered"], "correct": low["correct"]})
+
+    if buckets["high"]["answered"] == 0 and buckets["low"]["answered"] == 0:
+        return None
+    overconfident.sort(key=lambda c: c["answered"] - c["correct"], reverse=True)
+    underconfident.sort(key=lambda c: c["correct"], reverse=True)
+    return {
+        "by_confidence": [
+            {"confidence": level, **buckets[level]}
+            for level in CALIBRATION_LEVELS
+            if buckets[level]["answered"]
+        ],
+        "overconfident": overconfident[:CALIBRATION_TOP_N],
+        "underconfident": underconfident[:CALIBRATION_TOP_N],
+    }
+
+
 def _summary(session: Dict) -> Dict:
     mode_cfg = MODES[session["mode"]]
     concepts = session["concepts"]
@@ -229,6 +281,7 @@ def _summary(session: Dict) -> Dict:
         ],
         "concepts_parked": [n for n, s in concepts.items() if s.get("parked")],
         "concepts": _concept_states(session),
+        "calibration": _calibration(session),
     }
 
 
@@ -300,7 +353,10 @@ def _pick_next_task(session: Dict) -> Optional[Dict]:
     return None
 
 
-def _seed_concepts_sync(user_id: str, topics: List[str]) -> Dict[str, Dict]:
+def _seed_concepts_sync(
+    user_id: str, topics: List[str],
+    document_id: Optional[str] = None, subject: Optional[str] = None,
+) -> Dict[str, Dict]:
     """Seed each topic's knowledge state from the user's persistent
     concept_mastery rows. Topic names are matched against stored concepts by
     embedding similarity, so rephrasings of a concept the user has studied
@@ -318,6 +374,12 @@ def _seed_concepts_sync(user_id: str, topics: List[str]) -> Dict[str, Dict]:
                 prior_misconceptions = db.get_recent_misconceptions(match["id"])
             except Exception:
                 prior_misconceptions = []
+            # Point the concept at the material it's being studied from now,
+            # so a due review can reopen that document for a refresher.
+            try:
+                db.set_concept_source(match["id"], document_id, subject)
+            except Exception:
+                pass
             concepts[topic] = {
                 **_fresh_concept_state(),
                 "mastery": min(1.0, max(0.05, match["mastery"])),
@@ -326,11 +388,22 @@ def _seed_concepts_sync(user_id: str, topics: List[str]) -> Dict[str, Dict]:
                 # so write-backs can persist base + session totals.
                 "prior_questions_asked": match["questions_asked"],
                 "prior_questions_correct": match["questions_correct"],
+                # Lifetime calibration counters (.get: absent until the
+                # calibration migration updates the match RPC's return set).
+                "prior_calibration": {
+                    "high": {"answered": match.get("conf_high_asked") or 0,
+                             "correct": match.get("conf_high_correct") or 0},
+                    "low": {"answered": match.get("conf_low_asked") or 0,
+                            "correct": match.get("conf_low_correct") or 0},
+                },
                 "prior_misconceptions": prior_misconceptions,
                 "resumed": match["questions_asked"] > 0,
             }
         else:
-            row_id = db.create_concept_mastery(user_id, topic, embedding, MASTERY_START)
+            row_id = db.create_concept_mastery(
+                user_id, topic, embedding, MASTERY_START,
+                document_id=document_id, subject=subject,
+            )
             concepts[topic] = {**_fresh_concept_state(), "mastery_row_id": row_id}
     return concepts
 
@@ -410,7 +483,8 @@ def get_session_state(session_id: str, user_id: str) -> Optional[Dict]:
 
 
 def _finish_session(session_id: str, session: Dict) -> Dict:
-    """Build the summary, record the session as an attempt, drop the cache."""
+    """Build the summary, record the session as an attempt, reschedule each
+    concept's next spaced review, and drop the cache."""
     summary = _summary(session)
     _sessions.pop(session_id, None)
     try:
@@ -419,6 +493,18 @@ def _finish_session(session_id: str, session: Dict) -> Dict:
         # Best-effort: the student still gets their summary even if the
         # attempt couldn't be recorded.
         pass
+    # Spaced repetition for concepts (ROADMAP_LEARNING 6): a session that
+    # confirmed a concept pushes its next review out at a growing interval;
+    # a session that found it weak/parked resets it to a short one. Only
+    # concepts actually probed this session count as review evidence.
+    mastered = set(summary["concepts_mastered"])
+    for name, state in session["concepts"].items():
+        if not state.get("mastery_row_id") or state["questions_asked"] == 0:
+            continue
+        try:
+            db.schedule_concept_review(state["mastery_row_id"], name in mastered)
+        except Exception:
+            pass
     return summary
 
 
@@ -435,6 +521,7 @@ def wrap_session(session_id: str, user_id: str) -> Optional[Dict]:
 async def start_session(
     user_id: str, text_content: str, subject: str, mode: str, ai_service: BloomAI,
     concepts_filter: Optional[List[str]] = None,
+    document_id: Optional[str] = None,
     progress=None,
 ) -> Dict:
     """Extract the concepts to teach, seed the knowledge state from prior
@@ -464,7 +551,7 @@ async def start_session(
     # midpoint states if the memory layer or DB is unavailable (fail open).
     _report("Checking what you already know")
     try:
-        concepts = await asyncio.to_thread(_seed_concepts_sync, user_id, topics)
+        concepts = await asyncio.to_thread(_seed_concepts_sync, user_id, topics, document_id, subject)
     except Exception:
         concepts = {topic: _fresh_concept_state() for topic in topics}
 
@@ -546,6 +633,16 @@ async def submit_answer(
         state["questions_correct"] += 1
     state["last_correct"] = correct
 
+    # Calibration log (ROADMAP_LEARNING 5): how sure they said they were vs.
+    # how they did. A partial answer counts as a hit here — real substance
+    # was there, so it isn't the clean miss overconfidence detection needs.
+    # (.setdefault: sessions persisted before this field existed.)
+    level = confidence if confidence in CALIBRATION_LEVELS else "medium"
+    bucket = state.setdefault("calibration", {}).setdefault(level, {"answered": 0, "correct": 0})
+    bucket["answered"] += 1
+    if correct or partial:
+        bucket["correct"] += 1
+
     evidence = {"fresh": "fresh", "verify": "variant", "recheck": "recheck"}[kind]
     evidence += "_correct" if correct else "_wrong"
     multipliers = CONFIDENCE_MULTIPLIER.get(confidence, CONFIDENCE_MULTIPLIER["medium"])
@@ -604,6 +701,28 @@ async def submit_answer(
             )
         except Exception:
             pass
+        # Lifetime calibration counters (base + session). Medium answers
+        # don't move them, so skip the write; best-effort like everything
+        # else (and separate, so a missing migration can't block mastery).
+        if level != "medium":
+            prior_cal = state.get("prior_calibration") or {}
+            session_cal = state["calibration"]
+            totals = {
+                lv: {
+                    key: prior_cal.get(lv, {}).get(key, 0) + session_cal.get(lv, {}).get(key, 0)
+                    for key in ("answered", "correct")
+                }
+                for lv in ("high", "low")
+            }
+            try:
+                await asyncio.to_thread(
+                    db.update_concept_calibration,
+                    state["mastery_row_id"],
+                    totals["high"]["answered"], totals["high"]["correct"],
+                    totals["low"]["answered"], totals["low"]["correct"],
+                )
+            except Exception:
+                pass
 
     # Diagnose *why* the answer was wrong, not just that it was. Fail open:
     # a failed diagnosis call degrades to explanation-only feedback.

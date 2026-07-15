@@ -11,9 +11,10 @@ from pptx import Presentation
 from dotenv import load_dotenv
 
 from .ai_service import BloomAI
-from .models import SummaryRequest, QuizRequest, QuizResponse, SummaryResponse, FlashcardRequest, FlashcardResponse, AnswerCheckRequest, AnswerCheckResponse, AttemptBreakdownResponse, UserStatsResponse, UserAnalyticsResponse, AttemptRecapResponse, RecentAttempt, Subject, CreateSubjectRequest, TutorStartRequest, TutorStartResponse, TutorAnswerRequest, TutorAnswerResponse, TutorWrapRequest, TutorWrapResponse, DocumentInfo, DocumentContent, DueFlashcard, DueFlashcardsResponse, FlashcardReviewRequest, FlashcardReviewResponse
+from .models import SummaryRequest, QuizRequest, QuizResponse, SummaryResponse, FlashcardRequest, FlashcardResponse, AnswerCheckRequest, AnswerCheckResponse, AttemptBreakdownResponse, UserStatsResponse, UserAnalyticsResponse, AttemptRecapResponse, RecentAttempt, Subject, CreateSubjectRequest, TutorStartRequest, TutorStartResponse, TutorAnswerRequest, TutorAnswerResponse, TutorWrapRequest, TutorWrapResponse, DocumentInfo, DocumentContent, DueFlashcard, DueFlashcardsResponse, FlashcardReviewRequest, FlashcardReviewResponse, PretestStartRequest, PretestStartResponse, PretestSubmitRequest, PretestSubmitResponse, DueConceptReviewsResponse
 from . import extraction_agent
 from . import tutor_agent
+from . import pretest_agent
 from . import memory_service
 from . import db
 from . import auth
@@ -146,11 +147,21 @@ async def generate_summary(
     subject: Optional[str] = Form(None),
     progress_id: Optional[str] = Form(None),
     has_overlap: bool = Form(False),
+    focus_concepts: Optional[str] = Form(None),  # JSON array of concept names
     user_id: str = Depends(auth.get_current_user_id)
 ):
     """Generate summary from text content"""
     try:
         weak_concepts = await _weak_concepts_if_overlap(has_overlap, user_id, text_content)
+        # Pretest-informed emphasis (ROADMAP_LEARNING 1): concepts the user
+        # just missed on the pretest get extra coverage in the summary.
+        if focus_concepts:
+            try:
+                parsed = json.loads(focus_concepts)
+                if isinstance(parsed, list):
+                    weak_concepts = list(dict.fromkeys((weak_concepts or []) + [str(c) for c in parsed]))
+            except (json.JSONDecodeError, TypeError):
+                pass
         summary = await ai_service.generate_summary(
             text_content=text_content,
             summary_type=summary_type,
@@ -265,6 +276,16 @@ async def get_my_due_flashcards(external_user_id: str = Depends(auth.get_current
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching due flashcards: {str(e)}")
 
+@app.get("/me/concepts/due", response_model=DueConceptReviewsResponse)
+async def get_my_due_concepts(external_user_id: str = Depends(auth.get_current_user_id)):
+    """Concepts whose spaced-review schedule says they're due (ROADMAP_LEARNING
+    6), with their source document so the frontend can one-click a refresher
+    tutor session on the stored content."""
+    try:
+        return DueConceptReviewsResponse(**db.get_due_concept_reviews(external_user_id))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching due concepts: {str(e)}")
+
 @app.post("/flashcards/{card_id}/review", response_model=FlashcardReviewResponse)
 async def review_flashcard(
     card_id: str,
@@ -285,6 +306,47 @@ async def review_flashcard(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error recording review: {str(e)}")
 
+# --- Pretesting (ROADMAP_LEARNING 1): retrieval before re-reading. A short
+# --- quiz taken before the summary is shown; results calibrate the user's
+# --- persistent concept mastery and flag weak spots in the summary.
+
+@app.post("/pretest/start", response_model=PretestStartResponse)
+async def pretest_start(request: PretestStartRequest, user_id: str = Depends(auth.get_current_user_id)):
+    """Generate a short pretest (one multiple-choice question per extracted
+    concept) to take before any summary is shown. Answers stay server-side."""
+    try:
+        if not request.text_content.strip():
+            raise HTTPException(status_code=400, detail="text_content cannot be empty")
+        result = await pretest_agent.start_pretest(
+            user_id, request.text_content, request.subject, ai_service,
+            document_id=request.document_id,
+            progress=progress.reporter(request.progress_id),
+        )
+        return PretestStartResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error starting pretest: {str(e)}")
+    finally:
+        progress.clear(request.progress_id)
+
+@app.post("/pretest/submit", response_model=PretestSubmitResponse)
+async def pretest_submit(request: PretestSubmitRequest, user_id: str = Depends(auth.get_current_user_id)):
+    """Grade a pretest, write the per-concept outcomes into the user's
+    persistent concept mastery (so a tutor session afterwards starts
+    calibrated), and return the correction plus the missed concepts."""
+    try:
+        result = await pretest_agent.submit_pretest(request.pretest_id, user_id, request.answers)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Pretest not found or expired")
+        return PretestSubmitResponse(**result)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error submitting pretest: {str(e)}")
+
 @app.post("/tutor/start", response_model=TutorStartResponse)
 async def tutor_start(request: TutorStartRequest, user_id: str = Depends(auth.get_current_user_id)):
     """Start an adaptive tutor session: extract the concepts to teach from
@@ -299,6 +361,7 @@ async def tutor_start(request: TutorStartRequest, user_id: str = Depends(auth.ge
         result = await tutor_agent.start_session(
             user_id, request.text_content, request.subject, request.mode, ai_service,
             concepts_filter=request.concepts,
+            document_id=request.document_id,
             progress=progress.reporter(request.progress_id),
         )
         return TutorStartResponse(**result)

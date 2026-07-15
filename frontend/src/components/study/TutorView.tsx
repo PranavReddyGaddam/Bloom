@@ -9,9 +9,10 @@ import {
   TutorAnswerResponse,
   TutorQuestion,
   ConceptState,
-  TutorSessionSummary
+  TutorSessionSummary,
+  SessionCalibration
 } from '@/types'
-import { ArrowLeft, Check, X, Lightbulb, GraduationCap, RotateCcw, BookOpen, Flag } from 'lucide-react'
+import { ArrowLeft, Check, X, Lightbulb, GraduationCap, RotateCcw, BookOpen, Flag, Gauge } from 'lucide-react'
 import { MathText } from './MathText'
 
 const LIME = 'text-[#D7FF3D]'
@@ -65,6 +66,81 @@ function MasteryBars({ concepts }: { concepts: ConceptState[] }) {
           </div>
         </div>
       ))}
+    </div>
+  )
+}
+
+const CONFIDENCE_LABEL: Record<string, string> = {
+  low: 'Not sure',
+  medium: 'Fairly sure',
+  high: 'Certain',
+}
+
+// Calibration panel: how self-reported confidence lined up with results.
+// Only rendered when the student actually varied the confidence selector.
+function CalibrationPanel({ calibration }: { calibration: SessionCalibration }) {
+  const high = calibration.by_confidence.find(bucket => bucket.confidence === 'high')
+  const low = calibration.by_confidence.find(bucket => bucket.confidence === 'low')
+  const highWrong = high ? high.answered - high.correct : 0
+  const flagged = calibration.overconfident.length > 0 || calibration.underconfident.length > 0
+
+  return (
+    <div className="rounded-xl border border-white/15 bg-white/[0.03] p-5 mb-8">
+      <h3 className="text-white font-medium mb-1 font-sans flex items-center gap-2">
+        <Gauge className={`h-4 w-4 ${LIME}`} />
+        How well do you know what you know?
+      </h3>
+      <p className="text-xs text-white/40 mb-3">
+        {calibration.by_confidence
+          .map(bucket => `${CONFIDENCE_LABEL[bucket.confidence]}: ${bucket.correct}/${bucket.answered} right`)
+          .join(' · ')}
+      </p>
+
+      {calibration.overconfident.length > 0 && high && (
+        <div className="mb-3">
+          <p className="text-sm text-white/80 mb-1.5">
+            You said <span className="text-red-300">&ldquo;Certain&rdquo;</span> on {high.answered}{' '}
+            {high.answered === 1 ? 'answer' : 'answers'} and got {highWrong} wrong — watch for
+            overconfidence on:
+          </p>
+          <ul className="space-y-1">
+            {calibration.overconfident.map(item => (
+              <li key={item.concept} className="text-sm text-white/70 pl-4">
+                {item.concept}{' '}
+                <span className="text-white/40">
+                  ({item.answered - item.correct} of {item.answered} &ldquo;Certain&rdquo; {item.answered === 1 ? 'answer' : 'answers'} wrong)
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {calibration.underconfident.length > 0 && low && (
+        <div>
+          <p className="text-sm text-white/80 mb-1.5">
+            You said <span className={LIME}>&ldquo;Not sure&rdquo;</span> on {low.answered}{' '}
+            {low.answered === 1 ? 'answer' : 'answers'} but got {low.correct} right — you know these
+            better than you think:
+          </p>
+          <ul className="space-y-1">
+            {calibration.underconfident.map(item => (
+              <li key={item.concept} className="text-sm text-white/70 pl-4">
+                {item.concept}{' '}
+                <span className="text-white/40">
+                  ({item.correct} of {item.answered} &ldquo;Not sure&rdquo; {item.answered === 1 ? 'answer' : 'answers'} right)
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {!flagged && (
+        <p className="text-sm text-white/70">
+          Your confidence matched your results — well calibrated.
+        </p>
+      )}
     </div>
   )
 }
@@ -159,6 +235,8 @@ function SessionSummaryView({ summary, resetApp, onExit, onPracticeConcepts }: {
           )}
         </div>
       </div>
+
+      {summary.calibration && <CalibrationPanel calibration={summary.calibration} />}
 
       {parked.length > 0 && (
         <div className="rounded-xl border border-amber-300/30 bg-amber-400/[0.06] p-5 mb-8">

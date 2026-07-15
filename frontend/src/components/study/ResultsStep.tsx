@@ -12,6 +12,8 @@ import { QuizResultsView } from './QuizResultsView'
 
 interface ResultsStepProps {
   summary: SummaryResponse | null
+  // Concepts missed on a pretest, to flag visually in the summary.
+  flaggedConcepts?: string[]
   quiz: QuizResponse | null
   quizResult: QuizResult | null
   userAnswers: UserAnswer[]
@@ -28,6 +30,7 @@ interface ResultsStepProps {
 
 export function ResultsStep({
   summary,
+  flaggedConcepts,
   quiz,
   quizResult,
   userAnswers,
@@ -103,7 +106,7 @@ export function ResultsStep({
             </TabsList>
 
             <TabsContent value="summary" className="space-y-4">
-              {summary && <SummaryView summary={summary} />}
+              {summary && <SummaryView summary={summary} flaggedConcepts={flaggedConcepts} />}
             </TabsContent>
 
             <TabsContent value="quiz" className="space-y-4">
