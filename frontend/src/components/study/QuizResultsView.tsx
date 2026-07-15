@@ -4,6 +4,7 @@ import { Badge } from '@/components/ui/badge'
 import { Check, RotateCcw, X } from 'lucide-react'
 import { QuizResponse, QuizResult, UserAnswer, AttemptBreakdown } from '@/types'
 import { api } from '@/lib/api'
+import { MathText } from './MathText'
 
 const LIME_BG = 'bg-[#D7FF3D]'
 
@@ -167,7 +168,7 @@ export function QuizResultsView({
               </div>
               <div className="flex-1">
                 <h5 className="font-medium text-white mb-2">
-                  {reviewIndex + 1}. {question.question}
+                  {reviewIndex + 1}. <MathText text={question.question} />
                 </h5>
 
                 <div className="space-y-2 text-sm">
@@ -175,20 +176,20 @@ export function QuizResultsView({
                     isCorrect ? 'bg-[#D7FF3D]/10 text-[#D7FF3D]' : 'bg-red-500/10 text-red-300'
                   }`}>
                     <span className="font-medium">Your answer: </span>
-                    {userAnswer || 'No answer selected'}
+                    {userAnswer ? <MathText text={userAnswer} /> : 'No answer selected'}
                   </div>
 
                   {!isCorrect && (
                     <div className="p-2 rounded-lg bg-[#D7FF3D]/10 text-[#D7FF3D]">
                       <span className="font-medium">Correct answer: </span>
-                      {question.correct_answer}
+                      <MathText text={question.correct_answer} />
                     </div>
                   )}
 
                   {question.explanation && (
                     <div className="p-2 rounded-lg bg-white/10 text-white/70">
                       <span className="font-medium">Explanation: </span>
-                      {question.explanation}
+                      <MathText text={question.explanation} />
                     </div>
                   )}
                 </div>

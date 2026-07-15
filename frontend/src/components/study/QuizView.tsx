@@ -1,5 +1,6 @@
 import { Button } from '@/components/ui/button'
 import { QuizResponse, UserAnswer } from '@/types'
+import { MathText } from './MathText'
 
 const LIME_BG = 'bg-[#D7FF3D]'
 
@@ -40,7 +41,7 @@ export function QuizView({
           <div className="space-y-6">
             <div>
               <h3 className="text-lg font-medium text-white leading-relaxed mb-6 font-sans">
-                {quiz.questions[currentQuestionIndex].question}
+                <MathText text={quiz.questions[currentQuestionIndex].question} />
               </h3>
 
               <div className="space-y-3">
@@ -57,7 +58,7 @@ export function QuizView({
                       checked={userAnswers.find(a => a.questionIndex === currentQuestionIndex)?.selectedOption === option}
                       className="mt-1 h-4 w-4 accent-[#D7FF3D]"
                     />
-                    <span className="text-white/90 leading-relaxed">{option}</span>
+                    <span className="text-white/90 leading-relaxed"><MathText text={option} /></span>
                   </label>
                 ))}
               </div>

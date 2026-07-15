@@ -4,14 +4,14 @@ import { useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import Grainient from '@/components/Grainient'
 import { FeatureAccordion, type AccordionFeature } from '@/components/FeatureAccordion'
+import { PipelineBeam } from '@/components/PipelineBeam'
+import { HeroOrbit } from '@/components/HeroOrbit'
 import {
-  FileText,
   Layers,
   Target,
   Upload,
   ArrowRight,
   ArrowUpRight,
-  Circle,
   ScanSearch,
   PenLine,
   ShieldCheck,
@@ -22,30 +22,30 @@ const FEATURES: AccordionFeature[] = [
   {
     icon: Upload,
     num: '01',
-    title: 'PDF Upload',
-    description: 'Import lecture slides or notes and convert them into study material instantly. Drag in any PDF and Bloom extracts the key concepts automatically.',
-    points: ['Drag & drop import', 'Automatic text extraction', 'Works with slides & scans'],
+    title: 'Smart Upload',
+    description: 'Upload slides, notes, or documents and Bloom reads every page — diagrams, charts, and equations included, described by vision AI instead of being dropped.',
+    points: ['PDF, DOCX & PPTX support', 'Diagrams and equations understood, not skipped', 'Key concepts extracted automatically'],
   },
   {
     icon: Layers,
     num: '02',
-    title: 'Flashcards',
-    description: 'Spaced-repetition cards, generated for you automatically from whatever material you upload.',
-    points: ['Auto-generated decks', 'Spaced repetition scheduling', 'Track mastery over time'],
+    title: 'Summaries & Flashcards',
+    description: 'Study material that checks itself: every summary is drafted, critiqued against your source, and revised before you see it — with flashcard decks generated alongside.',
+    points: ['Concept-grouped summaries', 'Self-critiqued against your material', 'Flashcard decks in one click'],
   },
   {
-    icon: FileText,
+    icon: ShieldCheck,
     num: '03',
-    title: 'Paste Text',
-    description: 'Drop in any text and generate a study set right away, no formatting or file upload required.',
-    points: ['Instant generation', 'No file required', 'Works with any subject'],
+    title: 'Grounded Quizzes',
+    description: 'Every question is fact-checked against your material before it reaches you, so you never study a hallucination. Explanations and analytics come built in.',
+    points: ['Answers verified against your source', 'Per-question explanations', 'Performance analytics by concept and difficulty'],
   },
   {
     icon: Target,
     num: '04',
-    title: 'Practice Tests',
-    description: 'Test yourself with questions built directly from your material, scored and timed like the real thing.',
-    points: ['Auto-graded scoring', 'Timed test mode', 'Built from your material'],
+    title: 'Adaptive Tutor',
+    description: 'A one-on-one session that tracks your mastery of each concept live, targets your weakest one next, and explains why you got an answer wrong — not just that you did.',
+    points: ['Per-concept mastery tracking', 'Difficulty calibrated to you, question by question', 'Diagnoses the why behind wrong answers'],
   },
 ]
 
@@ -106,13 +106,16 @@ export default function LandingPage() {
       {/* Hero */}
       <section className="relative z-10 max-w-7xl mx-auto px-6 pt-16 pb-32 grid lg:grid-cols-2 gap-16 items-center">
         <div>
-          <h1 className="font-serif text-6xl sm:text-7xl lg:text-8xl font-light text-white leading-[1.05]">
-            Don&apos;t just read,
+          <h1 className="font-sans text-6xl sm:text-7xl lg:text-8xl font-light text-white leading-[1.05]">
+            AI tutor that
             <br />
-            <span className={`italic font-normal ${LIME}`}>remember.</span>
+            <span className={`font-serif italic font-normal ${LIME}`}>remembers</span>
+            <br />
+            how you learn
           </h1>
           <p className="mt-8 text-xl text-white/70 max-w-md leading-relaxed font-sans font-light">
-            Smart study generation with AI. Upload material, generate quizzes, and retain more effortlessly.
+            Bloom tracks misconceptions, adapts every session, and helps you retain
+            knowledge&mdash;not just memorize it.
           </p>
           <div className="mt-10">
             <Button
@@ -126,108 +129,15 @@ export default function LandingPage() {
           </div>
         </div>
 
-        {/* Overlapping glass cards */}
-        <div className="relative h-[560px] hidden lg:block">
-          {/* Back card — Dashboard */}
-          <div
-            className="absolute top-0 left-0 w-[380px] rounded-3xl border border-white/20 bg-white/10 backdrop-blur-xl shadow-2xl p-7 font-sans"
-            style={{ transform: 'perspective(1200px) rotateY(-8deg) rotateX(3deg) rotate(-4deg)' }}
-          >
-            <div className="flex items-center gap-2 mb-6">
-              <span className={`h-2.5 w-2.5 rounded-full ${LIME_BG}`} />
-              <span className="text-white font-medium text-lg">Dashboard</span>
-            </div>
-            <div className="rounded-2xl bg-gradient-to-br from-indigo-500/60 to-blue-600/40 p-5 mb-5">
-              <div className="text-white/90 text-sm font-medium mb-4">Study Progress</div>
-              <div className="flex items-end gap-2 h-20">
-                {[40, 55, 35, 70, 60, 90, 50].map((h, i) => (
-                  <div key={i} className="flex-1 bg-white/70 rounded-sm" style={{ height: `${h}%` }} />
-                ))}
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4 mb-5">
-              <div className="rounded-xl bg-white/10 border border-white/10 p-4">
-                <div className="text-white/50 text-xs">Sets Created</div>
-                <div className="text-white font-semibold text-2xl mt-0.5">18</div>
-              </div>
-              <div className="rounded-xl bg-white/10 border border-white/10 p-4">
-                <div className="text-white/50 text-xs">Cards</div>
-                <div className="text-white font-semibold text-2xl mt-0.5">312</div>
-              </div>
-            </div>
-            <div className="rounded-xl bg-white/10 border border-white/10 p-4">
-              <div className="text-white/60 text-xs font-medium mb-2.5">Recent Activity</div>
-              <div className="space-y-2 text-sm text-white/70">
-                <div className="flex items-center gap-2">
-                  <Circle className={`h-1.5 w-1.5 fill-current ${LIME}`} strokeWidth={0} />
-                  Biology quiz generated
-                </div>
-                <div className="flex items-center gap-2">
-                  <Circle className="h-1.5 w-1.5 fill-current text-blue-300" strokeWidth={0} />
-                  New flashcard set added
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Front card — Retention */}
-          <div
-            className="absolute top-40 left-48 w-[380px] rounded-3xl border border-white/20 bg-white/10 backdrop-blur-xl shadow-2xl p-7 font-sans"
-            style={{ transform: 'perspective(1200px) rotateY(6deg) rotateX(-2deg) rotate(3deg)' }}
-          >
-            <div className="flex items-center justify-between mb-6">
-              <div className="flex items-center gap-2">
-                <span className={`h-2.5 w-2.5 rounded-full ${LIME_BG}`} />
-                <span className="text-white font-medium text-lg">Retention</span>
-              </div>
-              <span className={`text-xs font-semibold ${LIME}`}>Live</span>
-            </div>
-            <div className="rounded-2xl bg-gradient-to-br from-emerald-500/30 to-lime-400/20 p-5 mb-5 flex items-center justify-between">
-              <div>
-                <div className="text-white/80 text-sm font-medium mb-1.5">Quiz Score</div>
-                <div className={`text-4xl font-semibold ${LIME}`}>92%</div>
-              </div>
-              <div className="relative h-20 w-20">
-                <svg viewBox="0 0 36 36" className="h-20 w-20 -rotate-90">
-                  <circle cx="18" cy="18" r="15.5" fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="3" />
-                  <circle cx="18" cy="18" r="15.5" fill="none" stroke="#D7FF3D" strokeWidth="3" strokeDasharray="97.4" strokeDashoffset="18" strokeLinecap="round" />
-                </svg>
-              </div>
-            </div>
-            <div className="space-y-3 mb-5 text-sm">
-              <div className="flex items-center justify-between">
-                <span className="text-white/60">Cards mastered</span>
-                <span className="text-white font-semibold">231</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-white/60">Due today</span>
-                <span className="text-white font-semibold">14</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-white/60">Streak</span>
-                <span className={`font-semibold ${LIME}`}>9 days</span>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="rounded-xl bg-white/10 border border-white/10 py-3 text-center text-white text-sm font-medium">
-                Add Set
-              </div>
-              <div className={`rounded-xl ${LIME_BG} py-3 text-center text-black text-sm font-semibold`}>
-                Study
-              </div>
-            </div>
-          </div>
+        {/* Orbiting feature icons */}
+        <div className="hidden lg:block">
+          <HeroOrbit />
         </div>
       </section>
 
-      {/* metric strip */}
-      <div className="relative z-10 max-w-7xl mx-auto px-6 pb-24 pt-12 font-sans">
-        <div className="relative border border-white/15 grid grid-cols-2 sm:grid-cols-4 divide-y divide-x-0 sm:divide-y-0 sm:divide-x divide-white/15">
-          {/* outer corners */}
-          <span className="absolute top-0 left-0 -translate-x-1/2 -translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
-          <span className="absolute top-0 right-0 translate-x-1/2 -translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
-          <span className="absolute bottom-0 left-0 -translate-x-1/2 translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
-          <span className="absolute bottom-0 right-0 translate-x-1/2 translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
+      {/* metric strip — full-bleed, edge to edge */}
+      <div className="relative z-10 pb-24 pt-12 font-sans">
+        <div className="relative border-y border-white/15 grid grid-cols-2 sm:grid-cols-4 divide-y divide-x-0 sm:divide-y-0 sm:divide-x divide-white/15">
           {/* internal divider junctions (desktop: 1 row, 3 dividers) */}
           <span className="hidden sm:block absolute top-0 left-1/4 -translate-x-1/2 -translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
           <span className="hidden sm:block absolute bottom-0 left-1/4 -translate-x-1/2 translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
@@ -235,17 +145,15 @@ export default function LandingPage() {
           <span className="hidden sm:block absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
           <span className="hidden sm:block absolute top-0 left-3/4 -translate-x-1/2 -translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
           <span className="hidden sm:block absolute bottom-0 left-3/4 -translate-x-1/2 translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
-          {/* internal junctions (mobile: 2x2 grid — center cross + mid-edge points) */}
-          <span className="sm:hidden absolute top-1/2 left-0 -translate-x-1/2 -translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
-          <span className="sm:hidden absolute top-1/2 right-0 translate-x-1/2 -translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
+          {/* internal junctions (mobile: 2x2 grid — center cross) */}
           <span className="sm:hidden absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-white/40 text-sm leading-none select-none">+</span>
           {[
-            ['98%', 'of students report better understanding'],
-            ['3 min', 'average time to generate a study set'],
+            ['100%', 'of quiz questions fact-checked against your material'],
             ['4', 'study modes in one platform'],
-            ['312', 'flashcards generated per set on average'],
+            ['3', 'file formats supported — PDF, DOCX, PPTX'],
+            ['5', 'concepts tracked live in every tutor session'],
           ].map(([stat, label]) => (
-            <div key={stat} className="p-6">
+            <div key={stat} className="p-6 text-center">
               <div className="text-3xl sm:text-4xl font-semibold text-white">{stat}</div>
               <div className="text-sm text-white/60 leading-relaxed mt-2">{label}</div>
             </div>
@@ -366,7 +274,8 @@ export default function LandingPage() {
                 </h2>
                 <p className="text-lg text-white/60 mb-9 max-w-md leading-relaxed font-sans font-light">
                   Bloom turns whatever you give it — slides, notes, a textbook chapter — into
-                  flashcards, a practice test, and a study guide, all grounded in that one source.
+                  flashcards, a practice test, a study guide, and a live tutor session, all
+                  grounded in that one source.
                 </p>
                 <Button
                   onClick={handleNavigateToUpload}
@@ -378,30 +287,7 @@ export default function LandingPage() {
                 </Button>
               </div>
 
-              <div className="flex flex-col items-center gap-4">
-                <div className="rounded-xl bg-white/10 border border-white/15 px-5 py-3 flex items-center gap-2.5 w-fit">
-                  <FileText className="h-4 w-4 text-white/50" />
-                  <span className="text-sm font-medium text-white/80">Biology_101.pdf</span>
-                </div>
-
-                <div className="h-8 w-px bg-gradient-to-b from-white/20 to-transparent" />
-
-                <div className="flex flex-wrap justify-center gap-3">
-                  {[
-                    { icon: Layers, label: 'Flashcards' },
-                    { icon: Target, label: 'Practice Test' },
-                    { icon: FileText, label: 'Study Guide' },
-                  ].map(({ icon: Icon, label }) => (
-                    <div
-                      key={label}
-                      className="rounded-xl bg-white/5 border border-white/10 px-4 py-3 flex flex-col items-center gap-2 w-28"
-                    >
-                      <Icon className={`h-4 w-4 ${LIME}`} />
-                      <span className="text-xs font-medium text-white/70 text-center">{label}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
+              <PipelineBeam />
             </div>
           </div>
         </div>

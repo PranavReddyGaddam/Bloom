@@ -17,6 +17,8 @@ import {
   File,
   Presentation
 } from 'lucide-react'
+import { DocumentLibrary } from './DocumentLibrary'
+import { ReviewDeck } from './ReviewDeck'
 
 const LIME = 'text-[#D7FF3D]'
 
@@ -25,9 +27,14 @@ interface UploadStepProps {
   file: { name: string; size: number } | null
   loading: boolean
   error: string
+  // Live stage of the extraction pipeline ("Describing diagrams and
+  // figures (4 of 12 pages)") — replaces the frozen "Processing file..." text.
+  progressStage?: string
   handleFileUpload: (event: React.ChangeEvent<HTMLInputElement>) => void
   removeFile: () => void
   resetApp: () => void
+  // Makes a stored upload the active material ("study this again").
+  onOpenDocument: (documentId: string) => Promise<void>
 }
 
 export function UploadStep({
@@ -35,9 +42,11 @@ export function UploadStep({
   file,
   loading,
   error,
+  progressStage,
   handleFileUpload,
   removeFile,
-  resetApp
+  resetApp,
+  onOpenDocument
 }: UploadStepProps) {
   const router = useRouter()
 
@@ -157,10 +166,18 @@ export function UploadStep({
           {loading && (
             <div className="mt-4">
               <Progress value={50} className="w-64 mx-auto bg-white/10" />
-              <p className="text-sm text-white/50 mt-2">Processing file...</p>
+              <p className="text-sm text-white/50 mt-2" aria-live="polite">
+                {progressStage || 'Processing file...'}
+              </p>
             </div>
           )}
         </div>
+
+        {/* Spaced repetition: cards due for review greet returning users */}
+        <ReviewDeck />
+
+        {/* Documents library: past uploads, re-studiable without the file */}
+        <DocumentLibrary onOpen={onOpenDocument} />
 
         {/* Footer */}
         <footer className="mt-16 py-8 border-t border-white/10">

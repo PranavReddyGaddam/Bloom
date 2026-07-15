@@ -124,7 +124,7 @@ export function SubjectSelect({ subjectId, onSelect, labelHtmlFor }: SubjectSele
     <div className="space-y-2">
       <Label htmlFor={labelHtmlFor} className="text-sm font-medium text-white/70">Subject</Label>
       <Select value={subjectId ?? undefined} onValueChange={handleSelectChange}>
-        <SelectTrigger className="bg-white/5 border-white/20 text-white">
+        <SelectTrigger className="bg-white/5 border-white/20 text-white data-[placeholder]:text-white/50">
           <SelectValue placeholder="Select a subject" />
         </SelectTrigger>
         <SelectContent className="bg-[#0d1230] border-white/15 text-white">

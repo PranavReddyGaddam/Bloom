@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { MathText } from './MathText'
 
 // Flashcard component with flip functionality
 export function FlashcardItem({ card }: { card: { front: string; back: string; category?: string } }) {
@@ -49,10 +50,10 @@ export function FlashcardItem({ card }: { card: { front: string; back: string; c
                 <div className="text-2xl font-medium leading-relaxed break-words hyphens-auto overflow-hidden">
                   {card.front.length > 300 ? (
                     <div className="max-h-64 overflow-y-auto pr-2 text-lg leading-snug">
-                      {card.front}
+                      <MathText text={card.front} />
                     </div>
                   ) : (
-                    card.front
+                    <MathText text={card.front} />
                   )}
                 </div>
               </div>
@@ -91,10 +92,10 @@ export function FlashcardItem({ card }: { card: { front: string; back: string; c
                 <div className="text-2xl font-medium leading-relaxed break-words hyphens-auto overflow-hidden">
                   {card.back.length > 300 ? (
                     <div className="max-h-64 overflow-y-auto pr-2 text-lg leading-snug">
-                      {card.back}
+                      <MathText text={card.back} />
                     </div>
                   ) : (
-                    card.back
+                    <MathText text={card.back} />
                   )}
                 </div>
               </div>

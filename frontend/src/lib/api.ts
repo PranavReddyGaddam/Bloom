@@ -15,7 +15,14 @@ import {
   AttemptRecap,
   Subject,
   TutorStartResponse,
-  TutorAnswerResponse
+  TutorAnswerResponse,
+  TutorSessionSummary,
+  TutorMode,
+  DocumentInfo,
+  DocumentContent,
+  DueFlashcardsResponse,
+  FlashcardReviewResponse,
+  ReviewGrade
 } from '@/types';
 import { createClient } from '@/lib/supabase/client';
 
@@ -35,9 +42,23 @@ async function authHeaders(): Promise<Record<string, string>> {
 }
 
 export const api = {
-  async uploadPDF(file: File): Promise<PDFUploadResponse> {
+  // Stage-level progress of a long-running operation. The id is generated
+  // client-side (crypto.randomUUID) and passed with the slow request; poll
+  // this while it's in flight. Unknown ids return { stage: null }.
+  async getProgress(progressId: string): Promise<{ stage: string | null }> {
+    const response = await fetch(`${API_BASE_URL}/progress/${progressId}`);
+    if (!response.ok) {
+      throw new APIError('Failed to fetch progress', response.status);
+    }
+    return response.json();
+  },
+
+  async uploadPDF(file: File, progressId?: string): Promise<PDFUploadResponse> {
     const formData = new FormData();
     formData.append('file', file);
+    if (progressId) {
+      formData.append('progress_id', progressId);
+    }
 
     const response = await fetch(`${API_BASE_URL}/upload-pdf`, {
       method: 'POST',
@@ -56,13 +77,21 @@ export const api = {
   async generateSummary(
     textContent: string,
     summaryType: SummaryType,
-    subject?: string
+    subject?: string,
+    progressId?: string,
+    hasOverlap?: boolean
   ): Promise<SummaryResponse> {
     const formData = new FormData();
     formData.append('text_content', textContent);
     formData.append('summary_type', summaryType);
     if (subject) {
       formData.append('subject', subject);
+    }
+    if (progressId) {
+      formData.append('progress_id', progressId);
+    }
+    if (hasOverlap) {
+      formData.append('has_overlap', 'true');
     }
 
     const response = await fetch(`${API_BASE_URL}/generate-summary`, {
@@ -84,15 +113,19 @@ export const api = {
     numQuestions: number,
     subject: string,
     difficulty: Difficulty,
-    previousScore?: number
+    progressId?: string,
+    hasOverlap?: boolean
   ): Promise<QuizResponse> {
     const formData = new FormData();
     formData.append('text_content', textContent);
     formData.append('num_questions', numQuestions.toString());
     formData.append('subject', subject);
     formData.append('difficulty', difficulty);
-    if (previousScore !== undefined) {
-      formData.append('previous_score', previousScore.toString());
+    if (progressId) {
+      formData.append('progress_id', progressId);
+    }
+    if (hasOverlap) {
+      formData.append('has_overlap', 'true');
     }
 
     const response = await fetch(`${API_BASE_URL}/generate-quiz`, {
@@ -242,7 +275,9 @@ export const api = {
   async startTutorSession(
     textContent: string,
     subject: string,
-    maxQuestions: number
+    mode: TutorMode,
+    concepts?: string[],
+    progressId?: string
   ): Promise<TutorStartResponse> {
     const response = await fetch(`${API_BASE_URL}/tutor/start`, {
       method: 'POST',
@@ -250,7 +285,9 @@ export const api = {
       body: JSON.stringify({
         text_content: textContent,
         subject,
-        max_questions: maxQuestions,
+        mode,
+        ...(concepts && concepts.length > 0 ? { concepts } : {}),
+        ...(progressId ? { progress_id: progressId } : {}),
       }),
     });
 
@@ -262,11 +299,40 @@ export const api = {
     return response.json();
   },
 
-  async submitTutorAnswer(sessionId: string, answer: string): Promise<TutorAnswerResponse> {
+  async getTutorSession(sessionId: string): Promise<TutorStartResponse> {
+    const response = await fetch(`${API_BASE_URL}/tutor/session/${sessionId}`, {
+      headers: { ...(await authHeaders()) },
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to resume tutor session: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  async wrapTutorSession(sessionId: string): Promise<TutorSessionSummary> {
+    const response = await fetch(`${API_BASE_URL}/tutor/wrap`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to wrap tutor session: ${error}`, response.status);
+    }
+
+    const data = await response.json();
+    return data.summary;
+  },
+
+  async submitTutorAnswer(sessionId: string, answer: string, confidence?: string): Promise<TutorAnswerResponse> {
     const response = await fetch(`${API_BASE_URL}/tutor/answer`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
-      body: JSON.stringify({ session_id: sessionId, answer }),
+      body: JSON.stringify({ session_id: sessionId, answer, ...(confidence ? { confidence } : {}) }),
     });
 
     if (!response.ok) {
@@ -291,13 +357,17 @@ export const api = {
     textContent: string,
     numCards: number,
     subject: string,
-    cardType: CardType
+    cardType: CardType,
+    documentId?: string | null
   ): Promise<FlashcardResponse> {
     const formData = new FormData();
     formData.append('text_content', textContent);
     formData.append('num_cards', numCards.toString());
     formData.append('subject', subject);
     formData.append('card_type', cardType);
+    if (documentId) {
+      formData.append('document_id', documentId);
+    }
 
     const response = await fetch(`${API_BASE_URL}/generate-flashcards`, {
       method: 'POST',
@@ -308,6 +378,76 @@ export const api = {
     if (!response.ok) {
       const error = await response.text();
       throw new APIError(`Failed to generate flashcards: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  // --- Documents library ---
+
+  async getMyDocuments(): Promise<DocumentInfo[]> {
+    const response = await fetch(`${API_BASE_URL}/me/documents`, {
+      headers: await authHeaders(),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to fetch documents: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  async getDocumentContent(documentId: string): Promise<DocumentContent> {
+    const response = await fetch(`${API_BASE_URL}/documents/${documentId}/content`, {
+      headers: await authHeaders(),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to fetch document: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  async deleteDocument(documentId: string): Promise<void> {
+    const response = await fetch(`${API_BASE_URL}/documents/${documentId}`, {
+      method: 'DELETE',
+      headers: await authHeaders(),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to delete document: ${error}`, response.status);
+    }
+  },
+
+  // --- Spaced repetition ---
+
+  async getDueFlashcards(): Promise<DueFlashcardsResponse> {
+    const response = await fetch(`${API_BASE_URL}/me/flashcards/due`, {
+      headers: await authHeaders(),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to fetch due flashcards: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  async reviewFlashcard(cardId: string, grade: ReviewGrade): Promise<FlashcardReviewResponse> {
+    const response = await fetch(`${API_BASE_URL}/flashcards/${cardId}/review`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+      body: JSON.stringify({ grade }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to record review: ${error}`, response.status);
     }
 
     return response.json();

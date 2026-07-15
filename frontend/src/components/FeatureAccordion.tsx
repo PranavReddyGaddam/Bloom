@@ -25,10 +25,8 @@ export function FeatureAccordion({
         <div key={feature.title} className="group border-b border-white/15">
           <div className="flex items-center gap-6 py-8 cursor-default">
             <span className={`text-sm font-light ${LIME} shrink-0`}>{feature.num}</span>
-            <div className="h-12 w-12 rounded-full border border-white/15 flex items-center justify-center shrink-0 transition-colors duration-300 group-hover:border-[#D7FF3D]/60">
-              <feature.icon className="h-5 w-5 text-white/50 transition-colors duration-300 group-hover:text-[#D7FF3D]" />
-            </div>
-            <h3 className="font-serif text-2xl md:text-3xl font-light text-white/60 flex-1 transition-colors duration-300 group-hover:text-white">
+            <feature.icon className="h-5 w-5 shrink-0 text-white/50 transition-colors duration-300 group-hover:text-[#D7FF3D]" />
+            <h3 className="font-serif text-2xl md:text-3xl font-light text-white flex-1">
               {feature.title}
             </h3>
           </div>

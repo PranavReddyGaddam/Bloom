@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { ProfileAvatar } from '@/components/ProfileAvatar'
-import { StudyFormData, SummaryType, Difficulty, Subject, FlashcardResponse, SimilarDocument } from '@/types'
+import { StudyFormData, SummaryType, Difficulty, Subject, FlashcardResponse, SimilarDocument, TutorMode } from '@/types'
 import { ArrowLeft, RotateCcw, BookOpen, PencilLine, GraduationCap, X, ArrowRight, History } from 'lucide-react'
 import { SubjectSelect } from './SubjectSelect'
 import { FlashcardCarousel } from './FlashcardCarousel'
@@ -22,11 +22,16 @@ interface ConfigureStepProps {
   setFormData: React.Dispatch<React.SetStateAction<StudyFormData>>
   loading: boolean
   error: string
+  // Live stage of the generation pipeline ("Verifying answers against your
+  // material (3 of 10)") — shown in place of the generic loading label.
+  progressStage?: string
   similarDocuments: SimilarDocument[]
   flashcards: FlashcardResponse | null
   handleGenerate: () => void
   handleGenerateFlashcards: () => void
   handleStartTutor: () => void
+  // Switches the active material to an overlapping prior upload.
+  onOpenDocument: (documentId: string) => Promise<void>
   setCurrentStep: (step: 'upload' | 'configure' | 'results' | 'tutor') => void
   resetApp: () => void
 }
@@ -36,17 +41,33 @@ export function ConfigureStep({
   setFormData,
   loading,
   error,
+  progressStage,
   similarDocuments,
   flashcards,
   handleGenerate,
   handleGenerateFlashcards,
   handleStartTutor,
+  onOpenDocument,
   setCurrentStep,
   resetApp
 }: ConfigureStepProps) {
   const router = useRouter()
   const [mode, setMode] = useState<StudyMode>('flashcards')
   const [similarDismissed, setSimilarDismissed] = useState(false)
+  const [openingDocId, setOpeningDocId] = useState<string | null>(null)
+  const [openDocError, setOpenDocError] = useState('')
+
+  const handleOpenSimilar = async (documentId: string) => {
+    setOpeningDocId(documentId)
+    setOpenDocError('')
+    try {
+      await onOpenDocument(documentId)
+    } catch {
+      setOpenDocError('Failed to open that document')
+    } finally {
+      setOpeningDocId(null)
+    }
+  }
 
   const modeCard = (value: StudyMode, icon: React.ReactNode, title: string, description: string) => {
     const active = mode === value
@@ -134,20 +155,32 @@ export function ConfigureStep({
                   <p className="text-white font-medium font-sans mb-1">
                     You&apos;ve studied similar material before
                   </p>
-                  <ul className="text-sm text-white/70 space-y-1">
+                  <ul className="text-sm text-white/70 space-y-1.5">
                     {similarDocuments.map(doc => (
-                      <li key={doc.filename}>
-                        <span className="text-white">{doc.filename}</span>
-                        {' — '}
-                        {Math.round(doc.overlap * 100)}% of this upload overlaps
-                        {' · uploaded '}
-                        {new Date(doc.uploaded_at).toLocaleDateString()}
+                      <li key={doc.document_id} className="flex flex-wrap items-center gap-x-2">
+                        <span>
+                          <span className="text-white">{doc.filename}</span>
+                          {' — '}
+                          {Math.round(doc.overlap * 100)}% of this upload overlaps
+                          {' · uploaded '}
+                          {new Date(doc.uploaded_at).toLocaleDateString()}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenSimilar(doc.document_id)}
+                          disabled={openingDocId !== null}
+                          className={`underline underline-offset-2 hover:text-white transition-colors disabled:opacity-50 ${LIME}`}
+                        >
+                          {openingDocId === doc.document_id ? 'Opening…' : 'Open that document'}
+                        </button>
                       </li>
                     ))}
                   </ul>
                   <p className="text-sm text-white/50 mt-2">
-                    Consider revisiting that quiz instead, or continue for a fresh set.
+                    Continue for a fresh set — it will emphasize concepts you previously struggled with —
+                    or jump back to the earlier material.
                   </p>
+                  {openDocError && <p className="text-sm text-red-300 mt-2">{openDocError}</p>}
                 </div>
               </div>
               <button
@@ -246,7 +279,7 @@ export function ConfigureStep({
                     {loading ? (
                       <>
                         <div className="animate-spin h-4 w-4 mr-2 border-2 border-black/60 border-t-transparent rounded-full" />
-                        Generating...
+                        {progressStage || 'Generating...'}
                       </>
                     ) : (
                       'Generate Flashcards'
@@ -333,7 +366,7 @@ export function ConfigureStep({
                   {loading ? (
                     <>
                       <div className="animate-spin h-4 w-4 mr-2 border-2 border-black/60 border-t-transparent rounded-full" />
-                      Generating...
+                      {progressStage || 'Generating...'}
                     </>
                   ) : (
                     'Generate Quiz'
@@ -352,29 +385,27 @@ export function ConfigureStep({
                 />
 
                 <div className="space-y-2">
-                  <Label className="text-sm font-medium text-white/70">Session Length</Label>
+                  <Label className="text-sm font-medium text-white/70">Mode</Label>
                   <Select
-                    value={formData.numQuestions.toString()}
+                    value={formData.tutorMode}
                     onValueChange={(value) =>
-                      setFormData(prev => ({ ...prev, numQuestions: parseInt(value) }))
+                      setFormData(prev => ({ ...prev, tutorMode: value as TutorMode }))
                     }
                   >
                     <SelectTrigger className="bg-white/5 border-white/20 text-white">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent className="bg-[#0d1230] border-white/15 text-white">
-                      {[5, 10, 15, 20].map(num => (
-                        <SelectItem key={num} value={num.toString()}>Up to {num} questions</SelectItem>
-                      ))}
+                      <SelectItem value="vibe_check">Vibe check — a quick pass over the core ideas</SelectItem>
+                      <SelectItem value="locked_in">Locked in — drilled until it actually sticks</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
               </div>
 
               <p className="text-sm text-white/50 mt-6">
-                No difficulty to pick — the tutor starts by probing each concept, then calibrates
-                every next question to what you got right and wrong. The session ends early if you
-                master everything.
+                No question count, no difficulty to pick — the tutor keeps probing each concept in
+                new framings until it&apos;s convinced you&apos;ve actually learned it, then stops on its own.
               </p>
 
               <div className="flex justify-end mt-8">
@@ -386,7 +417,7 @@ export function ConfigureStep({
                   {loading ? (
                     <>
                       <div className="animate-spin h-4 w-4 mr-2 border-2 border-black/60 border-t-transparent rounded-full" />
-                      Preparing your session...
+                      {progressStage || 'Preparing your session...'}
                     </>
                   ) : (
                     'Start Tutor Session'
