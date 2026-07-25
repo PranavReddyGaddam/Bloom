@@ -12,7 +12,8 @@ import {
   TutorSessionSummary,
   SessionCalibration
 } from '@/types'
-import { ArrowLeft, Check, X, Lightbulb, GraduationCap, RotateCcw, BookOpen, Flag, Gauge } from 'lucide-react'
+import { ArrowLeft, Check, X, Lightbulb, GraduationCap, RotateCcw, BookOpen, Flag, Gauge, MessageCircleQuestion, Sparkles } from 'lucide-react'
+import { GlassRadio } from '@/components/ui/glass-radio'
 import { MathText } from './MathText'
 
 const LIME = 'text-[#D7FF3D]'
@@ -167,6 +168,17 @@ function SessionSummaryView({ summary, resetApp, onExit, onPracticeConcepts }: {
   }, [onPracticeConcepts, summary.concepts_weak])
 
   const parked = summary.concepts_parked ?? []
+  const corrected = summary.misconceptions_corrected ?? []
+
+  // Multi-document sessions (ROADMAP_LEARNING 3): "go re-read the material"
+  // only helps if we say *which* file. The backend sets source_document only
+  // when the session spanned more than one document, so this is empty (and
+  // renders nothing) for single-document sessions.
+  const sourceOf = new Map(
+    summary.concepts
+      .filter(c => c.source_document)
+      .map(c => [c.concept, c.source_document as string])
+  )
 
   return (
     <div className="bg-white/[0.06] backdrop-blur-xl rounded-2xl border border-white/15 p-8">
@@ -226,7 +238,14 @@ function SessionSummaryView({ summary, resetApp, onExit, onPracticeConcepts }: {
               {summary.concepts_weak.map(concept => (
                 <li key={concept} className="flex items-start gap-2 text-sm text-white/80">
                   <RotateCcw className="h-4 w-4 mt-0.5 shrink-0 text-white/40" />
-                  {concept}
+                  <span>
+                    {concept}
+                    {sourceOf.has(concept) && (
+                      <span className="block text-xs text-white/40">
+                        from {sourceOf.get(concept)}
+                      </span>
+                    )}
+                  </span>
                 </li>
               ))}
             </ul>
@@ -237,6 +256,31 @@ function SessionSummaryView({ summary, resetApp, onExit, onPracticeConcepts }: {
       </div>
 
       {summary.calibration && <CalibrationPanel calibration={summary.calibration} />}
+
+      {/* Teach-it-back outcome: misconceptions the student argued down, now
+          cleared from their misconception memory. */}
+      {corrected.length > 0 && (
+        <div className="rounded-xl border border-[#D7FF3D]/30 bg-[#D7FF3D]/[0.06] p-5 mb-8">
+          <h3 className="text-white font-medium mb-2 font-sans flex items-center gap-2">
+            <Sparkles className={`h-4 w-4 ${LIME}`} />
+            What you unlearned
+          </h3>
+          <p className="text-sm text-white/60 mb-3">
+            You corrected {corrected.length === 1 ? 'a mistake' : 'mistakes'} you&apos;d made before —
+            {corrected.length === 1 ? ' it won’t' : ' they won’t'} be used against you in future sessions.
+          </p>
+          <ul className="space-y-2">
+            {corrected.map((item, index) => (
+              <li key={index} className="text-sm text-white/80">
+                <span className="text-white/40">{item.concept}: </span>
+                <span className="line-through decoration-white/30">
+                  <MathText text={item.misconception} />
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {parked.length > 0 && (
         <div className="rounded-xl border border-amber-300/30 bg-amber-400/[0.06] p-5 mb-8">
@@ -250,7 +294,12 @@ function SessionSummaryView({ summary, resetApp, onExit, onPracticeConcepts }: {
           </p>
           <ul className="space-y-1">
             {parked.map(concept => (
-              <li key={concept} className="text-sm text-white/80">{concept}</li>
+              <li key={concept} className="text-sm text-white/80">
+                {concept}
+                {sourceOf.has(concept) && (
+                  <span className="text-white/40"> — in {sourceOf.get(concept)}</span>
+                )}
+              </li>
             ))}
           </ul>
         </div>
@@ -315,6 +364,12 @@ export function TutorView({ session, onExit, resetApp, onPracticeConcepts, onSes
   // Free-text questions (higher-mastery concepts) take a typed answer
   // instead of a choice; grading happens server-side either way.
   const isFreeText = question.answer_mode === 'free_text'
+  // Self-explanation follow-up after a correct pick: free-text, skippable,
+  // and a failed justification revokes the credit the answer just earned.
+  const isExplanation = question.is_explanation === true
+  // Teach-it-back: this isn't a question — it's a confused peer stating
+  // something wrong, and the student's job is to correct it.
+  const isTeachBack = question.is_teach_back === true
   const answer = isFreeText ? textAnswer.trim() : selected
 
   const handleSubmit = useCallback(async () => {
@@ -350,6 +405,24 @@ export function TutorView({ session, onExit, resetApp, onPracticeConcepts, onSes
     setShowCheckpoint(false)
   }, [feedback, onSessionComplete])
 
+  // Skipping an explanation submits an empty answer — the backend treats
+  // "couldn't say why" the same as a wrong justification.
+  const handleSkip = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const result = await api.submitTutorAnswer(session.session_id, '')
+      setFeedback(result)
+      if (result.checkpoint && !result.done) {
+        setShowCheckpoint(true)
+      }
+    } catch (err) {
+      setError(err instanceof APIError ? err.message : 'Failed to submit answer')
+    } finally {
+      setLoading(false)
+    }
+  }, [session.session_id])
+
   const handleWrapUp = useCallback(async () => {
     setWrapLoading(true)
     setError('')
@@ -373,7 +446,11 @@ export function TutorView({ session, onExit, resetApp, onPracticeConcepts, onSes
       <div className="bg-white/[0.06] backdrop-blur-xl rounded-2xl border border-white/15 p-6">
         <div className="flex justify-between items-center pb-4 border-b border-white/10 mb-6">
           <div className="text-sm text-white/50">
-            Question {question.question_number}
+            {isExplanation
+              ? 'Follow-up'
+              : isTeachBack
+                ? `Correct me · ${question.question_number}`
+                : `Question ${question.question_number}`}
           </div>
           <div className="text-sm text-white/40">
             Runs until it sticks
@@ -387,9 +464,30 @@ export function TutorView({ session, onExit, resetApp, onPracticeConcepts, onSes
           </Alert>
         )}
 
-        <h3 className="text-lg font-medium text-white leading-relaxed mb-6 font-sans">
-          <MathText text={question.question} />
-        </h3>
+        {isTeachBack ? (
+          /* The tutor is role-playing a confused classmate — present the
+             misconception as something a person said, not as a question,
+             or the student won't know they're meant to push back on it. */
+          <div className="mb-6">
+            <div className="flex items-start gap-3">
+              <div className="h-8 w-8 shrink-0 rounded-full bg-white/10 border border-white/15 flex items-center justify-center">
+                <MessageCircleQuestion className="h-4 w-4 text-white/50" />
+              </div>
+              <div className="flex-1">
+                <p className="text-xs text-white/40 mb-1.5">A classmate says:</p>
+                <div className="rounded-2xl rounded-tl-sm border border-white/15 bg-white/[0.05] p-4">
+                  <p className="text-lg font-medium text-white leading-relaxed font-sans">
+                    <MathText text={question.question} />
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <h3 className="text-lg font-medium text-white leading-relaxed mb-6 font-sans">
+            <MathText text={question.question} />
+          </h3>
+        )}
 
         {isFreeText ? (
           <div>
@@ -397,12 +495,20 @@ export function TutorView({ session, onExit, resetApp, onPracticeConcepts, onSes
               value={textAnswer}
               onChange={(e) => setTextAnswer(e.target.value)}
               disabled={feedback !== null}
-              placeholder="Answer in your own words (1-3 sentences)…"
+              placeholder={
+                isTeachBack
+                  ? 'Put them right — what did they get wrong, and what’s actually true?'
+                  : 'Answer in your own words (1-3 sentences)…'
+              }
               rows={4}
               className="w-full rounded-xl border border-white/15 bg-white/[0.03] p-4 text-white/90 leading-relaxed placeholder:text-white/30 focus:outline-none focus:border-[#D7FF3D]/60 disabled:opacity-60 resize-y"
             />
             <p className="text-xs text-white/40 mt-2">
-              Open-ended question — you&apos;re past recognition on this one, so write the answer yourself.
+              {isTeachBack
+                ? 'Both halves count: name what’s wrong, then say what’s actually right.'
+                : isExplanation
+                  ? 'You picked right — now show it wasn’t a lucky guess. One sentence is enough.'
+                  : 'Open-ended question — you’re past recognition on this one, so write the answer yourself.'}
             </p>
           </div>
         ) : (
@@ -428,14 +534,14 @@ export function TutorView({ session, onExit, resetApp, onPracticeConcepts, onSes
                   feedback === null ? 'cursor-pointer' : 'cursor-default'
                 } ${optionClasses}`}
               >
-                <input
-                  type="radio"
+                <GlassRadio
                   name="tutor-question"
                   value={option}
                   onChange={() => feedback === null && setSelected(option)}
                   checked={isSelected}
                   disabled={feedback !== null}
-                  className="mt-1 h-4 w-4 accent-[#D7FF3D]"
+                  tone={isWrongPick ? 'wrong' : 'default'}
+                  className="mt-1"
                 />
                 <span className="text-white/90 leading-relaxed flex-1"><MathText text={option} /></span>
                 {isCorrectAnswer && <Check className={`h-5 w-5 shrink-0 ${LIME}`} />}
@@ -447,8 +553,9 @@ export function TutorView({ session, onExit, resetApp, onPracticeConcepts, onSes
         )}
 
         {/* Confidence selector — scales how strongly this answer moves the
-            mastery estimate (confidently wrong drops harder). */}
-        {feedback === null && (
+            mastery estimate (confidently wrong drops harder). Not shown for
+            explanation follow-ups (they only revoke earned credit). */}
+        {feedback === null && !isExplanation && (
           <div className="flex flex-wrap items-center gap-3 mt-6">
             <span className="text-sm text-white/50">How sure are you?</span>
             <div className="flex gap-2">
@@ -483,8 +590,36 @@ export function TutorView({ session, onExit, resetApp, onPracticeConcepts, onSes
               <p className={`font-medium font-sans mb-1 ${
                 feedback.correct ? LIME : feedback.verdict === 'partial' ? 'text-amber-300' : 'text-red-300'
               }`}>
-                {feedback.correct ? 'Correct' : feedback.verdict === 'partial' ? 'Partially correct' : 'Not quite'}
+                {isTeachBack
+                  ? feedback.correct ? 'Oh — that makes sense now' : feedback.verdict === 'partial' ? 'Half of that landed' : 'So I was right?'
+                  : isExplanation
+                    ? feedback.correct ? 'Solid explanation' : feedback.verdict === 'partial' ? 'Partly there' : 'That reasoning didn’t hold'
+                    : feedback.correct ? 'Correct' : feedback.verdict === 'partial' ? 'Partially correct' : 'Not quite'}
               </p>
+              {isExplanation && !feedback.correct && (
+                <p className="text-sm text-white/60 mb-1">
+                  A right pick without the why is recognition, not understanding — that answer counted for less.
+                </p>
+              )}
+
+              {/* Teach-it-back is graded on two parts; show which one fell
+                  short, so "partial" doesn't read as an arbitrary downgrade. */}
+              {isTeachBack && !feedback.correct && (
+                <div className="space-y-1 mb-2">
+                  <p className="text-sm text-white/70 flex items-center gap-2">
+                    {feedback.identified_error
+                      ? <Check className={`h-4 w-4 shrink-0 ${LIME}`} />
+                      : <X className="h-4 w-4 shrink-0 text-red-300" />}
+                    Named what was wrong
+                  </p>
+                  <p className="text-sm text-white/70 flex items-center gap-2">
+                    {feedback.stated_correction
+                      ? <Check className={`h-4 w-4 shrink-0 ${LIME}`} />
+                      : <X className="h-4 w-4 shrink-0 text-red-300" />}
+                    Stated what&apos;s actually right
+                  </p>
+                </div>
+              )}
               {feedback.missing && (
                 <p className="text-sm text-white/80 mb-1">
                   What was missing: <MathText text={feedback.missing} />
@@ -492,13 +627,33 @@ export function TutorView({ session, onExit, resetApp, onPracticeConcepts, onSes
               )}
               {isFreeText && !feedback.correct && (
                 <p className="text-sm text-white/80 mb-1">
-                  Model answer: <MathText text={feedback.correct_answer} />
+                  {isExplanation ? 'The actual reason: ' : isTeachBack ? 'What you should have told me: ' : 'Model answer: '}
+                  <MathText text={feedback.correct_answer} />
                 </p>
               )}
               {feedback.explanation && (
                 <p className="text-sm text-white/70"><MathText text={feedback.explanation} /></p>
               )}
             </div>
+
+            {/* The payoff of the mode: a mistake the student used to make,
+                explained away in their own words and retired from memory. */}
+            {feedback.cleared_misconception && (
+              <div className="rounded-xl border border-[#D7FF3D]/30 bg-[#D7FF3D]/[0.06] p-4">
+                <div className="flex items-start gap-3">
+                  <Sparkles className={`h-5 w-5 mt-0.5 shrink-0 ${LIME}`} />
+                  <div>
+                    <p className="text-white font-medium font-sans mb-1 text-sm">
+                      You just unlearned something
+                    </p>
+                    <p className="text-sm text-white/70">
+                      You used to believe: &ldquo;<MathText text={feedback.cleared_misconception} />&rdquo; — you
+                      just argued it down yourself, so I&apos;ll stop testing you on it.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {feedback.diagnosis && (
               <div className="rounded-xl border border-white/15 bg-white/[0.03] p-4">
@@ -549,20 +704,34 @@ export function TutorView({ session, onExit, resetApp, onPracticeConcepts, onSes
           </Button>
 
           {feedback === null ? (
-            <Button
-              onClick={handleSubmit}
-              disabled={loading || !answer}
-              className={`${LIME_BG} text-black hover:bg-[#c2e836] px-8`}
-            >
-              {loading ? (
-                <>
-                  <div className="animate-spin h-4 w-4 mr-2 border-2 border-black/60 border-t-transparent rounded-full" />
-                  Checking...
-                </>
-              ) : (
-                'Submit Answer'
+            <div className="flex items-center gap-3">
+              {isExplanation && (
+                <Button
+                  variant="outline"
+                  onClick={handleSkip}
+                  disabled={loading}
+                  className="border-white/20 bg-white/5 text-white hover:bg-white/10 hover:text-white"
+                >
+                  Can&apos;t say — skip
+                </Button>
               )}
-            </Button>
+              <Button
+                onClick={handleSubmit}
+                disabled={loading || !answer}
+                className={`${LIME_BG} text-black hover:bg-[#c2e836] px-8`}
+              >
+                {loading ? (
+                  <>
+                    <div className="animate-spin h-4 w-4 mr-2 border-2 border-black/60 border-t-transparent rounded-full" />
+                    Checking...
+                  </>
+                ) : isTeachBack ? (
+                  'Set them straight'
+                ) : (
+                  'Submit Answer'
+                )}
+              </Button>
+            </div>
           ) : (
             <Button onClick={handleNext} className={`${LIME_BG} text-black hover:bg-[#c2e836] px-8`}>
               {feedback.done ? 'See session summary' : 'Next question'}

@@ -128,19 +128,40 @@ def _find_similar_documents(user_id: str, embeddings: List[List[float]]) -> List
 
 
 def _store_document(user_id: str, filename: str, chunks: List[str], embeddings: List[List[float]]) -> str:
-    """Persist a document and its chunk embeddings, replacing any earlier
-    upload with the same filename so re-uploads don't accumulate stale
-    copies (delete cascades to its chunks). Returns the new document id.
+    """Persist a document and its chunk embeddings, replacing the content of
+    any earlier upload with the same filename so re-uploads don't accumulate
+    stale copies. Returns the document id.
+
+    Re-uploading reuses the existing row and swaps only its chunks, so the
+    document id is stable across re-uploads. That matters because the id is
+    referenced from outside this table — concept_mastery.document_id (a
+    concept's source material for spaced-repetition refreshers) and the
+    client's stored pointer to the material being studied. Deleting and
+    re-inserting would mint a new id and silently orphan all of them.
     """
     client = _get_client()
 
-    client.table("documents").delete().eq("user_id", user_id).eq("filename", filename).execute()
+    existing = (
+        client.table("documents")
+        .select("id")
+        .eq("user_id", user_id)
+        .eq("filename", filename)
+        .execute()
+        .data
+    )
 
-    document = client.table("documents").insert({
-        "user_id": user_id,
-        "filename": filename,
-    }).execute()
-    document_id = document.data[0]["id"]
+    if existing:
+        document_id = existing[0]["id"]
+        # Same document, new content: drop the old chunks (they're replaced
+        # wholesale below — a shorter re-upload must not leave a tail of
+        # stale chunks behind) and keep the row itself.
+        client.table("document_chunks").delete().eq("document_id", document_id).execute()
+    else:
+        document = client.table("documents").insert({
+            "user_id": user_id,
+            "filename": filename,
+        }).execute()
+        document_id = document.data[0]["id"]
 
     client.table("document_chunks").insert([
         {

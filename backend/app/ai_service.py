@@ -695,6 +695,147 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
             question["options"] = []
         return question
 
+    async def generate_misconception_statement(
+        self, text_content: str, concept: str, subject: str, asked_questions: List[str],
+        misconceptions: Optional[List[str]] = None,
+    ) -> Optional[Dict]:
+        """Write a confused-student statement for teach-it-back mode
+        (ROADMAP_LEARNING 4): a plausible, *wrong* claim about the concept
+        that the student has to correct in their own words.
+
+        Prefers restating one of the student's own past diagnosed
+        misconceptions — correcting your own error out loud is the point of
+        the mode, and it gives the session something concrete to clear.
+
+        Returns the statement plus what's wrong and what's right (the two
+        halves the grader requires), or None if generation failed or returned
+        unparseable JSON.
+        """
+        text_content = self._truncate(text_content, 12000)
+
+        avoid_block = ""
+        if asked_questions:
+            avoid_block = f"""
+Do NOT repeat or closely rephrase any of these statements/questions already used this session:
+{json.dumps(asked_questions)}
+"""
+
+        if misconceptions:
+            source_block = f"""
+This student has previously shown these misconceptions about this concept:
+{json.dumps(misconceptions)}
+Base your statement on ONE of these — voice their own past error back to them as your belief. Only
+invent a different plausible misconception if none of these can be stated as a claim the source text
+contradicts.
+"""
+        else:
+            source_block = """
+Invent ONE plausible misconception a student could genuinely hold about this concept — a believable
+confusion (a mix-up with a related idea, an over-generalization, a reversed cause and effect), not an
+absurd claim nobody would make.
+"""
+
+        prompt = f"""You are role-playing a confused student who has misunderstood something about {subject},
+specifically the concept "{concept}". The real student's job is to correct you, so your statement must be
+wrong in a way the source text below clearly contradicts.
+{source_block}{avoid_block}
+Write the misconception as something you believe, in the first person, 1-2 sentences, ending in a way
+that invites correction (e.g. "I thought mitochondria make proteins — that's right, isn't it?").
+Do NOT reveal the correction, hint that you are wrong, or explain anything: just state the wrong belief.
+
+Source text:
+{text_content}
+
+Respond with ONLY valid, minified JSON matching this schema, no text before or after:
+{{
+    "statement": "the first-person misconception, 1-2 sentences",
+    "whats_wrong": "one sentence naming precisely what is incorrect in the statement",
+    "whats_right": "one sentence stating the correct fact, as supported by the source text",
+    "category": "{concept}"
+}}"""
+
+        messages = [
+            {"role": "system", "content": self.base_system_message},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            response = await self._make_request(messages)
+        except Exception:
+            return None
+
+        parsed = self._parse_json_response(response)
+        if parsed is None or not parsed.get("statement") or not parsed.get("whats_right"):
+            return None
+        return parsed
+
+    async def grade_teach_back(
+        self, statement: Dict, user_answer: str, text_content: str,
+    ) -> Optional[Dict]:
+        """Grade a teach-it-back correction (ROADMAP_LEARNING 4) on the two
+        parts the mode requires: did the student identify what was wrong, and
+        did they state what's actually right? Both are needed for full credit
+        — spotting an error without being able to replace it isn't teaching,
+        and reciting the right fact without engaging the error can be
+        recitation past the point.
+
+        Returns {"verdict", "identified_error", "stated_correction",
+        "missing"}. Returns None if the call failed or returned unparseable
+        JSON — callers fail open (treat as correct), matching the
+        pipeline-wide policy that an API failure must never punish a student.
+        """
+        text_content = self._truncate(text_content, 8000)
+
+        prompt = f"""A student is teaching a confused peer. The peer stated a misconception; the student's job
+is to correct it. Grade the correction on TWO separate parts, judging substance over wording (accept
+synonyms and paraphrase):
+
+1. identified_error: did they recognize and name what was wrong in the statement? (Saying "no, that's
+   backwards" without naming what is backwards does NOT count.)
+2. stated_correction: did they state what is actually true? (It must be substantively correct per the
+   source text, not just a denial of the misconception.)
+
+Then set "verdict":
+- "correct": BOTH parts are present and accurate
+- "partial": exactly one part is present and accurate
+- "incorrect": neither part is present, or the student agreed with the misconception
+
+Source text:
+{text_content}
+
+The misconception stated to the student: {statement.get('statement')}
+What is actually wrong with it: {statement.get('whats_wrong')}
+The correct fact: {statement.get('whats_right')}
+The student's correction: {user_answer}
+
+Respond with ONLY valid, minified JSON matching this schema, no text before or after:
+{{
+    "verdict": "correct" or "partial" or "incorrect",
+    "identified_error": true or false,
+    "stated_correction": true or false,
+    "missing": "one sentence naming what the correction missed, or null if fully correct"
+}}"""
+
+        messages = [
+            {"role": "system", "content": self.base_system_message},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            response = await self._make_request(messages)
+        except Exception:
+            return None
+
+        parsed = self._parse_json_response(response)
+        if parsed is None or parsed.get("verdict") not in ("correct", "partial", "incorrect"):
+            return None
+        return {
+            "verdict": parsed["verdict"],
+            "identified_error": bool(parsed.get("identified_error")),
+            "stated_correction": bool(parsed.get("stated_correction")),
+            "missing": parsed.get("missing"),
+        }
+
     async def grade_free_text_answer(self, question: Dict, user_answer: str, text_content: str) -> Optional[Dict]:
         """Judge a student's typed answer against the model answer and the
         source text (ROADMAP 4.2).

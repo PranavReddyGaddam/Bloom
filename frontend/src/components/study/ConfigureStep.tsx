@@ -459,14 +459,25 @@ export function ConfigureStep({
                     <SelectContent className="bg-[#0d1230] border-white/15 text-white">
                       <SelectItem value="vibe_check">Vibe check — a quick pass over the core ideas</SelectItem>
                       <SelectItem value="locked_in">Locked in — drilled until it actually sticks</SelectItem>
+                      <SelectItem value="teach_back">Teach it back — you correct the tutor&apos;s mistakes</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
               </div>
 
               <p className="text-sm text-white/50 mt-6">
-                No question count, no difficulty to pick — the tutor keeps probing each concept in
-                new framings until it&apos;s convinced you&apos;ve actually learned it, then stops on its own.
+                {formData.tutorMode === 'teach_back' ? (
+                  <>
+                    The roles flip: the tutor plays a confused student and says something wrong —
+                    sometimes a mistake you&apos;ve actually made before — and you set it straight in your
+                    own words. Say what&apos;s wrong <em>and</em> what&apos;s right; explaining it is the point.
+                  </>
+                ) : (
+                  <>
+                    No question count, no difficulty to pick — the tutor keeps probing each concept in
+                    new framings until it&apos;s convinced you&apos;ve actually learned it, then stops on its own.
+                  </>
+                )}
               </p>
 
               <div className="flex justify-end mt-8">

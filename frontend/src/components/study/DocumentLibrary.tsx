@@ -11,10 +11,22 @@ const LIME = 'text-[#D7FF3D]'
 // Documents library (ROADMAP 3.1): the memory layer stores every upload —
 // this makes that store visible so material can be re-studied without
 // re-uploading the file.
-export function DocumentLibrary({ onOpen }: { onOpen: (documentId: string) => Promise<void> }) {
+//
+// Multi-select (ROADMAP_LEARNING 3): material arrives in sets, so 2+ documents
+// can be picked and studied as one combined tutor session. Opening a single
+// document stays a one-click action — checking boxes is the opt-in path.
+export function DocumentLibrary({
+  onOpen,
+  onStudyTogether,
+}: {
+  onOpen: (documentId: string) => Promise<void>
+  onStudyTogether?: (documentIds: string[]) => Promise<void>
+}) {
   const [documents, setDocuments] = useState<DocumentInfo[]>([])
   const [loaded, setLoaded] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [startingCombined, setStartingCombined] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -50,6 +62,12 @@ export function DocumentLibrary({ onOpen }: { onOpen: (documentId: string) => Pr
     try {
       await api.deleteDocument(documentId)
       setDocuments(prev => prev.filter(d => d.id !== documentId))
+      setSelected(prev => {
+        if (!prev.has(documentId)) return prev
+        const next = new Set(prev)
+        next.delete(documentId)
+        return next
+      })
     } catch {
       setError('Failed to delete that document')
     } finally {
@@ -57,23 +75,82 @@ export function DocumentLibrary({ onOpen }: { onOpen: (documentId: string) => Pr
     }
   }, [])
 
+  const toggleSelected = useCallback((documentId: string) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(documentId)) next.delete(documentId)
+      else next.add(documentId)
+      return next
+    })
+  }, [])
+
+  const handleStudyTogether = useCallback(async () => {
+    if (!onStudyTogether || selected.size < 2) return
+    setStartingCombined(true)
+    setError('')
+    try {
+      // Library order, not click order: the session should follow the list
+      // the student is looking at.
+      await onStudyTogether(documents.filter(d => selected.has(d.id)).map(d => d.id))
+    } catch {
+      setError('Failed to start a combined session')
+    } finally {
+      setStartingCombined(false)
+    }
+  }, [onStudyTogether, selected, documents])
+
   if (!loaded || documents.length === 0) return null
 
   return (
     <div className="mt-10">
       <h2 className="text-lg font-medium text-white mb-1 font-sans">Your library</h2>
       <p className="text-sm text-white/50 mb-4">
-        Everything you&apos;ve uploaded before — study it again without re-uploading
+        {onStudyTogether
+          ? 'Everything you’ve uploaded before — study it again, or tick two or more to study them together'
+          : 'Everything you’ve uploaded before — study it again without re-uploading'}
       </p>
 
       {error && <p className="text-sm text-red-300 mb-3">{error}</p>}
 
+      {onStudyTogether && selected.size >= 2 && (
+        <div className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-[#D7FF3D]/30 bg-[#D7FF3D]/[0.06] p-3">
+          <p className="text-sm text-white/80">
+            {selected.size} documents selected — concepts will interleave across them
+          </p>
+          <Button
+            size="sm"
+            onClick={handleStudyTogether}
+            disabled={startingCombined}
+            className="bg-[#D7FF3D] text-black hover:bg-[#D7FF3D]/90 shrink-0"
+          >
+            {startingCombined
+              ? <Loader2 className="h-4 w-4 animate-spin" />
+              : `Study these ${selected.size} together`}
+          </Button>
+        </div>
+      )}
+
       <ul className="space-y-2">
-        {documents.map(doc => (
+        {documents.map(doc => {
+          // Only the row being opened/deleted locks, plus everything while a
+          // combined session is starting — one slow row shouldn't freeze the
+          // whole list.
+          const busy = busyId === doc.id || startingCombined
+          return (
           <li
             key={doc.id}
             className="flex items-center gap-3 rounded-xl border border-white/15 bg-white/[0.04] backdrop-blur-xl p-4"
           >
+            {onStudyTogether && (
+              <input
+                type="checkbox"
+                checked={selected.has(doc.id)}
+                onChange={() => toggleSelected(doc.id)}
+                disabled={busy}
+                aria-label={`Select ${doc.filename} to study with others`}
+                className="h-4 w-4 shrink-0 cursor-pointer accent-[#D7FF3D] disabled:opacity-40"
+              />
+            )}
             <FileText className={`h-5 w-5 shrink-0 ${LIME}`} />
             <div className="flex-1 min-w-0">
               <p className="text-sm text-white truncate">{doc.filename}</p>
@@ -85,7 +162,7 @@ export function DocumentLibrary({ onOpen }: { onOpen: (documentId: string) => Pr
               size="sm"
               variant="outline"
               onClick={() => handleOpen(doc.id)}
-              disabled={busyId !== null}
+              disabled={busy}
               className="border-white/20 bg-white/5 text-white hover:bg-white/10 hover:text-white shrink-0"
             >
               {busyId === doc.id ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Study this again'}
@@ -93,14 +170,15 @@ export function DocumentLibrary({ onOpen }: { onOpen: (documentId: string) => Pr
             <button
               type="button"
               onClick={() => handleDelete(doc.id)}
-              disabled={busyId !== null}
+              disabled={busy}
               aria-label={`Delete ${doc.filename}`}
               className="shrink-0 text-white/40 hover:text-red-300 transition-colors disabled:opacity-40"
             >
               <Trash2 className="h-4 w-4" />
             </button>
           </li>
-        ))}
+          )
+        })}
       </ul>
     </div>
   )

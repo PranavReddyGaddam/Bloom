@@ -37,6 +37,9 @@ interface UploadStepProps {
   resetApp: () => void
   // Makes a stored upload the active material ("study this again").
   onOpenDocument: (documentId: string) => Promise<void>
+  // Makes several stored uploads the active material at once, for a tutor
+  // session that interleaves concepts across them (ROADMAP_LEARNING 3).
+  onStudyTogether: (documentIds: string[]) => Promise<void>
   // Starts a short concept-filtered tutor session on a due concept's
   // source document (concept spaced repetition).
   onStartRefresher: (review: DueConceptReview) => Promise<void>
@@ -52,6 +55,7 @@ export function UploadStep({
   removeFile,
   resetApp,
   onOpenDocument,
+  onStudyTogether,
   onStartRefresher
 }: UploadStepProps) {
   const router = useRouter()
@@ -187,7 +191,7 @@ export function UploadStep({
         <ConceptReviewBanner onStartRefresher={onStartRefresher} />
 
         {/* Documents library: past uploads, re-studiable without the file */}
-        <DocumentLibrary onOpen={onOpenDocument} />
+        <DocumentLibrary onOpen={onOpenDocument} onStudyTogether={onStudyTogether} />
 
         {/* Footer */}
         <footer className="mt-16 py-8 border-t border-white/10">

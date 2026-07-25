@@ -353,15 +353,38 @@ async def tutor_start(request: TutorStartRequest, user_id: str = Depends(auth.ge
     the uploaded material, initialize a per-concept knowledge state, and
     return the first question (without its answer — grading is server-side)."""
     try:
-        if not request.text_content.strip():
-            raise HTTPException(status_code=400, detail="text_content cannot be empty")
+        # One session, one or many documents (ROADMAP_LEARNING 3): `documents`
+        # is the general form, `text_content` the one-file shorthand. Collapse
+        # them here so nothing downstream has to care which the client sent.
+        if request.documents:
+            sources = [
+                {
+                    "text_content": doc.text_content,
+                    "filename": doc.filename,
+                    "document_id": doc.document_id,
+                }
+                for doc in request.documents
+                if doc.text_content and doc.text_content.strip()
+            ]
+        elif request.text_content.strip():
+            sources = [{
+                "text_content": request.text_content,
+                "filename": request.subject,
+                "document_id": request.document_id,
+            }]
+        else:
+            sources = []
+        if not sources:
+            raise HTTPException(
+                status_code=400,
+                detail="provide documents[] or text_content with material to study",
+            )
         if request.mode not in tutor_agent.MODES:
             raise HTTPException(status_code=400, detail="mode must be one of: " + ", ".join(tutor_agent.MODES))
 
         result = await tutor_agent.start_session(
-            user_id, request.text_content, request.subject, request.mode, ai_service,
+            user_id, sources, request.subject, request.mode, ai_service,
             concepts_filter=request.concepts,
-            document_id=request.document_id,
             progress=progress.reporter(request.progress_id),
         )
         return TutorStartResponse(**result)

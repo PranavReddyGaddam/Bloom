@@ -548,6 +548,10 @@ def create_tutor_session(external_id: str, session: Dict) -> str:
         "user_id": user_id,
         "subject": session["subject"],
         "text_content": session["text_content"],
+        # The session's material, one entry per document (ROADMAP_LEARNING 3).
+        # Immutable for the session's life, like text_content — so it lives
+        # here rather than in _TUTOR_STATE_FIELDS.
+        "sources": session["sources"],
         "mode": session["mode"],
         **{field: session[field] for field in _TUTOR_STATE_FIELDS},
     }
@@ -566,7 +570,7 @@ def get_tutor_session(session_id: str, external_id: str) -> Optional[Dict]:
 
     rows = (
         client.table("tutor_sessions")
-        .select("subject, text_content, mode, " + ", ".join(_TUTOR_STATE_FIELDS))
+        .select("subject, text_content, sources, mode, " + ", ".join(_TUTOR_STATE_FIELDS))
         .eq("id", session_id)
         .eq("user_id", user.data[0]["id"])
         .eq("status", "active")
@@ -581,6 +585,13 @@ def get_tutor_session(session_id: str, external_id: str) -> Optional[Dict]:
         "user_id": external_id,
         "subject": row["subject"],
         "text_content": row["text_content"],
+        # Sessions started before multi-document support have no sources —
+        # rebuild the single-source shape from the blob they do have.
+        "sources": row.get("sources") or [{
+            "text_content": row["text_content"],
+            "filename": row["subject"],
+            "document_id": None,
+        }],
         "mode": row["mode"],
         **{field: row[field] for field in _TUTOR_STATE_FIELDS},
         "updated_at": time.time(),
@@ -973,14 +984,30 @@ def record_misconception(external_id: str, concept_mastery_id: str, concept: str
 
 def get_recent_misconceptions(concept_mastery_id: str, limit: int = 3) -> List[str]:
     """Most recent diagnosed misconceptions for one concept, newest first."""
+    return [row["misconception"] for row in get_recent_misconception_rows(concept_mastery_id, limit)]
+
+
+def get_recent_misconception_rows(concept_mastery_id: str, limit: int = 3) -> List[Dict]:
+    """Most recent diagnosed misconceptions for one concept, newest first, as
+    {id, misconception} rows. Teach-it-back (ROADMAP_LEARNING 4) needs the id:
+    a misconception the student successfully corrects gets cleared, and you
+    can't delete a row you only know the text of."""
     client = _get_client()
-    rows = (
+    return (
         client.table("misconceptions")
-        .select("misconception")
+        .select("id, misconception")
         .eq("concept_mastery_id", concept_mastery_id)
         .order("created_at", desc=True)
         .limit(limit)
         .execute()
         .data
     )
-    return [row["misconception"] for row in rows]
+
+
+def clear_misconception(misconception_id: str) -> None:
+    """Drop one misconception the student has demonstrably corrected
+    (ROADMAP_LEARNING 4). Deleted rather than flagged: the row exists to seed
+    future probing, and a corrected misconception should stop being probed —
+    the mastery estimate is what carries the long-term record."""
+    client = _get_client()
+    client.table("misconceptions").delete().eq("id", misconception_id).execute()

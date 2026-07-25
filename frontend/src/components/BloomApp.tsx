@@ -12,6 +12,7 @@ import {
   StudyFormData,
   Difficulty,
   SimilarDocument,
+  TutorSource,
   TutorStartResponse,
   PretestStartResponse,
   DueConceptReview
@@ -48,25 +49,15 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
   // Library id of the current material (memory layer), for linking
   // generated flashcards back to their source document.
   const [documentId, setDocumentId] = useState<string | null>(null)
+  // Multi-document study (ROADMAP_LEARNING 3): the individual files behind
+  // textContent when several were picked from the library. Empty for the
+  // single-document paths (fresh upload, "study this again", refreshers),
+  // which keep using textContent/documentId above.
+  const [sources, setSources] = useState<TutorSource[]>([])
   const [similarDocuments, setSimilarDocuments] = useState<SimilarDocument[]>([])
   // Stage-level progress text for the long operations ("Describing diagrams
   // and figures (4 of 12 pages)"), polled from the backend while loading.
   const [progressStage, setProgressStage] = useState<string>('')
-
-  // Restore the uploaded file across page refreshes
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem(STORED_FILE_KEY)
-      if (stored) {
-        const { name, size, textContent: storedText, documentId: storedDocId } = JSON.parse(stored)
-        setFile({ name, size })
-        setTextContent(storedText)
-        setDocumentId(storedDocId ?? null)
-      }
-    } catch {
-      localStorage.removeItem(STORED_FILE_KEY)
-    }
-  }, [])
 
   // Poll the backend's stage-level progress for one operation. Returns a
   // stop function; progress is cosmetic, so poll errors are swallowed.
@@ -85,29 +76,6 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     }
   }, [])
 
-  // Resume an in-flight tutor session after a refresh: the session lives
-  // server-side; we only stored its id. A dead/finished session just clears
-  // the pointer and leaves the normal flow untouched.
-  useEffect(() => {
-    const stored = sessionStorage.getItem(TUTOR_SESSION_KEY)
-    if (!stored) return
-    let cancelled = false
-    ;(async () => {
-      try {
-        const { id, subjectName } = JSON.parse(stored)
-        const session = await api.getTutorSession(id)
-        if (cancelled) return
-        if (subjectName) {
-          setFormData(prev => ({ ...prev, subjectName }))
-        }
-        setTutorSession(session)
-        setCurrentStep('tutor')
-      } catch {
-        sessionStorage.removeItem(TUTOR_SESSION_KEY)
-      }
-    })()
-    return () => { cancelled = true }
-  }, [])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>('')
   const [summary, setSummary] = useState<SummaryResponse | null>(null)
@@ -135,6 +103,70 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     tutorMode: 'vibe_check'
   })
 
+  // Restore the uploaded file across page refreshes.
+  //
+  // The stored documentId points at a server-owned row that can disappear
+  // while this entry survives (the library's delete button). Confirm the
+  // document still exists before restoring: a stale pointer would otherwise
+  // sit in localStorage indefinitely, 404ing on every load and on every
+  // document-scoped action. A dead pointer resets to a clean upload state,
+  // which is where the user has to start again anyway.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const stored = localStorage.getItem(STORED_FILE_KEY)
+        if (!stored) return
+        const { name, size, textContent: storedText, documentId: storedDocId } = JSON.parse(stored)
+
+        if (storedDocId) {
+          try {
+            await api.getDocumentContent(storedDocId)
+          } catch (err) {
+            if (err instanceof APIError && err.status === 404) {
+              localStorage.removeItem(STORED_FILE_KEY)
+              return
+            }
+            // Any other failure (offline, 5xx) isn't evidence the document is
+            // gone — restore it and let the normal flow surface the error.
+          }
+        }
+
+        if (cancelled) return
+        setFile({ name, size })
+        setTextContent(storedText)
+        setDocumentId(storedDocId ?? null)
+      } catch {
+        localStorage.removeItem(STORED_FILE_KEY)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  // Resume an in-flight tutor session after a refresh: the session lives
+  // server-side; we only stored its id. A dead/finished session just clears
+  // the pointer and leaves the normal flow untouched.
+  useEffect(() => {
+    const stored = sessionStorage.getItem(TUTOR_SESSION_KEY)
+    if (!stored) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { id, subjectName } = JSON.parse(stored)
+        const session = await api.getTutorSession(id)
+        if (cancelled) return
+        if (subjectName) {
+          setFormData(prev => ({ ...prev, subjectName }))
+        }
+        setTutorSession(session)
+        setCurrentStep('tutor')
+      } catch {
+        sessionStorage.removeItem(TUTOR_SESSION_KEY)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
   const handleFileUpload = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = event.target.files?.[0]
 
@@ -155,6 +187,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
       const result = await api.uploadPDF(selectedFile, progressId)
       setTextContent(result.text_content)
       setDocumentId(result.document_id ?? null)
+      setSources([])
       setSimilarDocuments(result.similar_documents ?? [])
       localStorage.setItem(STORED_FILE_KEY, JSON.stringify({
         name: selectedFile.name,
@@ -257,7 +290,8 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
         formData.tutorMode,
         undefined,
         progressId,
-        documentId
+        documentId,
+        sources.length > 0 ? sources : undefined
       )
       setTutorSession(session)
       sessionStorage.setItem(TUTOR_SESSION_KEY, JSON.stringify({
@@ -271,7 +305,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
       stopPolling()
       setLoading(false)
     }
-  }, [textContent, formData, pollProgress, documentId])
+  }, [textContent, formData, pollProgress, documentId, sources])
 
   // Pretesting: a short quiz before any summary is shown. Grading writes
   // into the persistent concept mastery server-side, so tutor sessions
@@ -310,14 +344,15 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
       formData.tutorMode,
       concepts,
       undefined,
-      documentId
+      documentId,
+      sources.length > 0 ? sources : undefined
     )
     setTutorSession(session)
     sessionStorage.setItem(TUTOR_SESSION_KEY, JSON.stringify({
       id: session.session_id,
       subjectName: formData.subjectName,
     }))
-  }, [textContent, formData, documentId])
+  }, [textContent, formData, documentId, sources])
 
   // Concept spaced repetition: one click on a due concept re-opens its
   // source document from the library and starts a short tutor session
@@ -329,6 +364,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     setFile({ name: content.filename, size: 0 })
     setTextContent(content.text_content)
     setDocumentId(content.id)
+    setSources([])
     setSimilarDocuments([])
     localStorage.setItem(STORED_FILE_KEY, JSON.stringify({
       name: content.filename,
@@ -373,6 +409,38 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     setFlashcards(null)
     setQuizResult(null)
     setUserAnswers([])
+    setSources([])
+    setCurrentStep('configure')
+    router.push('/upload?step=configure')
+  }, [router])
+
+  // Multi-document study (ROADMAP_LEARNING 3): make several stored uploads the
+  // active material at once. textContent stays populated (joined) so the
+  // single-document tools — summary, quiz, flashcards — keep working off the
+  // combined text; only the tutor reads `sources` and interleaves across files.
+  const handleStudyTogether = useCallback(async (docIds: string[]) => {
+    setError('')
+    const contents = await Promise.all(docIds.map(id => api.getDocumentContent(id)))
+    const picked: TutorSource[] = contents.map(c => ({
+      text_content: c.text_content,
+      filename: c.filename,
+      document_id: c.id,
+    }))
+    setSources(picked)
+    setFile({ name: `${picked.length} documents`, size: 0 })
+    setTextContent(picked.map(s => `[${s.filename}]\n${s.text_content}`).join('\n\n'))
+    // No single document id: this material spans several.
+    setDocumentId(null)
+    setSimilarDocuments([])
+    // Deliberately not persisted to STORED_FILE_KEY — that slot holds one
+    // document, and a half-restored multi-doc session would be worse than
+    // asking the student to pick again.
+    localStorage.removeItem(STORED_FILE_KEY)
+    setSummary(null)
+    setQuiz(null)
+    setFlashcards(null)
+    setQuizResult(null)
+    setUserAnswers([])
     setCurrentStep('configure')
     router.push('/upload?step=configure')
   }, [router])
@@ -408,6 +476,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     setFile(null)
     setTextContent('')
     setDocumentId(null)
+    setSources([])
     setSimilarDocuments([])
     localStorage.removeItem(STORED_FILE_KEY)
     if (fileInputRef.current) {
@@ -419,6 +488,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     setFile(null)
     setTextContent('')
     setDocumentId(null)
+    setSources([])
     setSimilarDocuments([])
     localStorage.removeItem(STORED_FILE_KEY)
     setSummary(null)
@@ -449,6 +519,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
         removeFile={removeFile}
         resetApp={resetApp}
         onOpenDocument={handleOpenDocument}
+        onStudyTogether={handleStudyTogether}
         onStartRefresher={handleStartRefresher}
       />
     )

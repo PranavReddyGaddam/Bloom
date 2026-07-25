@@ -224,8 +224,9 @@ export interface PretestSubmitResponse {
   missed_concepts: string[];
 }
 
-// Sets the session's mastery bar, not a question count.
-export type TutorMode = 'vibe_check' | 'locked_in';
+// Sets the session's mastery bar, not a question count. 'teach_back' also
+// flips the roles: the tutor states misconceptions and you correct them.
+export type TutorMode = 'vibe_check' | 'locked_in' | 'teach_back';
 
 export interface TutorQuestion {
   // No concept name: the student shouldn't see what's being probed.
@@ -234,7 +235,21 @@ export interface TutorQuestion {
   options: string[];
   difficulty: string;
   answer_mode?: 'multiple_choice' | 'free_text';
+  // Self-explanation follow-up: a skippable "why is that the answer?"
+  // prompt after a correct pick — not a real question.
+  is_explanation?: boolean;
+  // Teach-it-back: a confused-student misconception to correct, not a
+  // question to answer.
+  is_teach_back?: boolean;
   question_number: number;
+}
+
+// One document in a tutor session's material (ROADMAP_LEARNING 3). A
+// single-document session is just a one-element list.
+export interface TutorSource {
+  text_content: string;
+  filename: string;
+  document_id?: string | null;
 }
 
 export interface ConceptState {
@@ -245,6 +260,9 @@ export interface ConceptState {
   mastered: boolean;
   parked?: boolean; // repeatedly failed rechecks; re-read the material
   resumed?: boolean; // seeded from a prior session's knowledge state
+  // Which file this concept came from. Only set when the session drew on
+  // more than one document — naming the file otherwise is noise.
+  source_document?: string | null;
 }
 
 export interface TutorStartResponse {
@@ -275,10 +293,19 @@ export interface SessionCalibration {
   underconfident: ConceptCalibration[];  // said "not sure", got it right
 }
 
+// A misconception argued down in teach-it-back mode, now cleared from the
+// user's misconception memory.
+export interface CorrectedMisconception {
+  concept: string;
+  misconception: string;
+}
+
 export interface TutorSessionSummary {
   total_questions: number;
   correct_answers: number;
   accuracy: number;
+  // What the student unlearned; empty outside teach-it-back sessions.
+  misconceptions_corrected?: CorrectedMisconception[];
   concepts_mastered: string[];
   concepts_weak: string[];
   concepts_parked?: string[];
@@ -296,6 +323,12 @@ export interface TutorAnswerResponse {
   correct_answer: string;
   explanation?: string | null;
   diagnosis?: string | null; // why the wrong answer was wrong; only set on incorrect answers
+  // Teach-it-back: which half of the correction landed (both are needed for
+  // full credit). Null outside teach-it-back.
+  identified_error?: boolean | null;
+  stated_correction?: boolean | null;
+  // The misconception this correction retired from memory, if any.
+  cleared_misconception?: string | null;
   done: boolean;
   checkpoint?: boolean; // one-time "want to wrap up?" offer
   next_question?: TutorQuestion | null;

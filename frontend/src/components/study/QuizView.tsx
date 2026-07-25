@@ -1,4 +1,5 @@
 import { Button } from '@/components/ui/button'
+import { GlassRadio } from '@/components/ui/glass-radio'
 import { QuizResponse, UserAnswer } from '@/types'
 import { MathText } from './MathText'
 
@@ -50,13 +51,12 @@ export function QuizView({
                     key={optionIndex}
                     className="flex items-start space-x-3 p-4 rounded-xl border border-white/15 bg-white/[0.03] hover:bg-white/[0.07] cursor-pointer transition-colors"
                   >
-                    <input
-                      type="radio"
+                    <GlassRadio
                       name={`question-${currentQuestionIndex}`}
                       value={option}
                       onChange={() => handleAnswerSelect(currentQuestionIndex, option)}
                       checked={userAnswers.find(a => a.questionIndex === currentQuestionIndex)?.selectedOption === option}
-                      className="mt-1 h-4 w-4 accent-[#D7FF3D]"
+                      className="mt-1"
                     />
                     <span className="text-white/90 leading-relaxed"><MathText text={option} /></span>
                   </label>

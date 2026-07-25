@@ -18,6 +18,7 @@ import {
   TutorAnswerResponse,
   TutorSessionSummary,
   TutorMode,
+  TutorSource,
   DocumentInfo,
   DocumentContent,
   DueFlashcardsResponse,
@@ -329,7 +330,11 @@ export const api = {
     mode: TutorMode,
     concepts?: string[],
     progressId?: string,
-    documentId?: string | null
+    documentId?: string | null,
+    // Multi-document sessions (ROADMAP_LEARNING 3). When set, this is the
+    // session's material and textContent is ignored; the singular fields
+    // remain the one-file path (fresh uploads, concept refreshers).
+    documents?: TutorSource[]
   ): Promise<TutorStartResponse> {
     const response = await fetch(`${API_BASE_URL}/tutor/start`, {
       method: 'POST',
@@ -338,6 +343,7 @@ export const api = {
         text_content: textContent,
         subject,
         mode,
+        ...(documents && documents.length > 0 ? { documents } : {}),
         ...(concepts && concepts.length > 0 ? { concepts } : {}),
         ...(progressId ? { progress_id: progressId } : {}),
         ...(documentId ? { document_id: documentId } : {}),

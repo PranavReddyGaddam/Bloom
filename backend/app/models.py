@@ -140,8 +140,28 @@ class DocumentContent(BaseModel):
     text_content: str
     word_count: int
 
-class TutorStartRequest(BaseModel):
+class TutorSource(BaseModel):
+    """One document in a tutor session's material (ROADMAP_LEARNING 3).
+
+    Material arrives in sets — a week of a course is three decks plus a
+    reading — so a session's source is a list of these, not one blob.
+    """
     text_content: str
+    # Shown to the student: a weak concept is only actionable if the summary
+    # can name *which* file to go re-read.
+    filename: str
+    # Library id, when the material came from the library rather than a
+    # fresh upload. Concepts remember it for spaced-repetition refreshers.
+    document_id: Optional[str] = None
+
+class TutorStartRequest(BaseModel):
+    # Material for the session. `documents` is the general form; the singular
+    # text_content/document_id below are the one-file shorthand, kept so the
+    # upload path and older clients keep working. Exactly one is required —
+    # the route normalizes both into a single list before anything downstream
+    # sees them.
+    documents: Optional[List[TutorSource]] = None
+    text_content: str = ""
     subject: str
     # Session mode sets the mastery bar, not a question count:
     # "vibe_check" (lighter) or "locked_in" (deeper verification).
@@ -163,6 +183,13 @@ class TutorQuestion(BaseModel):
     options: List[str] = []
     difficulty: str
     answer_mode: str = "multiple_choice"  # "multiple_choice" | "free_text"
+    # Self-explanation follow-up (ROADMAP_LEARNING 2): not a real question —
+    # a "why is that the answer?" prompt after a correct multiple-choice
+    # pick. Free-text, skippable, doesn't advance the question count.
+    is_explanation: bool = False
+    # Teach-it-back (ROADMAP_LEARNING 4): the roles are flipped — this is a
+    # confused-student misconception to correct, not a question to answer.
+    is_teach_back: bool = False
     question_number: int
 
 class ConceptState(BaseModel):
@@ -173,6 +200,10 @@ class ConceptState(BaseModel):
     mastered: bool
     parked: bool = False  # repeatedly failed rechecks; needs a re-read, not more drilling
     resumed: bool = False  # seeded from a prior session's knowledge state
+    # Filename this concept was extracted from (ROADMAP_LEARNING 3). "Go
+    # re-read the material" is only actionable when the summary can say which
+    # material. None for single-source sessions, where it'd be noise.
+    source_document: Optional[str] = None
 
 class TutorStartResponse(BaseModel):
     # No live concept states: knowledge state stays hidden until the summary.
@@ -206,10 +237,19 @@ class SessionCalibration(BaseModel):
     overconfident: List[ConceptCalibration]   # said "certain", got it wrong
     underconfident: List[ConceptCalibration]  # said "not sure", got it right
 
+class CorrectedMisconception(BaseModel):
+    # A misconception the student argued down in teach-it-back mode, and has
+    # therefore been cleared from their misconception memory.
+    concept: str
+    misconception: str
+
 class TutorSessionSummary(BaseModel):
     total_questions: int
     correct_answers: int
     accuracy: float
+    # Teach-it-back (ROADMAP_LEARNING 4): what the student unlearned. Always
+    # empty outside teach-it-back sessions.
+    misconceptions_corrected: List[CorrectedMisconception] = []
     concepts_mastered: List[str]
     concepts_weak: List[str]
     concepts_parked: List[str] = []
@@ -228,6 +268,14 @@ class TutorAnswerResponse(BaseModel):
     correct_answer: str
     explanation: Optional[str] = None
     diagnosis: Optional[str] = None  # why the wrong answer was wrong; only set on incorrect answers
+    # Teach-it-back (ROADMAP_LEARNING 4): which half of the correction landed.
+    # Full credit needs both — spotting the error without stating the truth
+    # (or vice versa) is partial. None outside teach-it-back.
+    identified_error: Optional[bool] = None
+    stated_correction: Optional[bool] = None
+    # The misconception this correction retired, if it was one of the
+    # student's own previously diagnosed ones.
+    cleared_misconception: Optional[str] = None
     done: bool
     # One-time "want to wrap up?" offer after many questions.
     checkpoint: bool = False
