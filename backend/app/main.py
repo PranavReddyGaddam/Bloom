@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import os
@@ -574,10 +574,14 @@ async def get_my_analytics(external_user_id: str = Depends(auth.get_current_user
         raise HTTPException(status_code=500, detail=f"Error fetching analytics: {str(e)}")
 
 @app.get("/me/recent-attempts", response_model=List[RecentAttempt])
-async def get_my_recent_attempts(external_user_id: str = Depends(auth.get_current_user_id)):
-    """Lightweight recent-attempts list for the sidebar"""
+async def get_my_recent_attempts(
+    limit: int = Query(20, ge=1, le=200),
+    external_user_id: str = Depends(auth.get_current_user_id),
+):
+    """Lightweight past-attempts list. The default is a short preview; the
+    scores page asks for more to show a full history."""
     try:
-        attempts = db.get_recent_attempts(external_user_id)
+        attempts = db.get_recent_attempts(external_user_id, limit=limit)
         return [RecentAttempt(**a) for a in attempts]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching recent attempts: {str(e)}")

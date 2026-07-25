@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { api } from '@/lib/api'
 import { DocumentInfo } from '@/types'
-import { Check, FileText, Trash2, Loader2, Plus } from 'lucide-react'
+import { Check, ChevronDown, FileText, Library, Trash2, Loader2, Plus } from 'lucide-react'
 
 const LIME = 'text-[#D7FF3D]'
 
@@ -30,6 +30,7 @@ export function DocumentLibrary({
   const [documents, setDocuments] = useState<DocumentInfo[]>([])
   const [loaded, setLoaded] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
+  const [open, setOpen] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -76,15 +77,44 @@ export function DocumentLibrary({
 
   if (!loaded || documents.length === 0) return null
 
+  const attachedCount = documents.filter(d => attachedIds.includes(d.id)).length
+
   return (
     <div className="mt-10">
-      <h2 className="text-lg font-medium text-white mb-1 font-sans">Your library</h2>
-      <p className="text-sm text-white/50 mb-4">
-        Everything you&apos;ve uploaded before — add any of it to what you&apos;re studying,
-        without re-uploading the file
-      </p>
+      {/* Collapsed by default: the library grows with every upload, and a long
+          list pushed the study bar off screen on the entry page. Full width so
+          it still reads as a section rather than a small control. */}
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+        className={`w-full flex items-center gap-3 px-5 py-4 border border-white/15 bg-white/[0.04] backdrop-blur-xl hover:border-white/30 transition-colors ${
+          open ? 'rounded-t-2xl border-b-0' : 'rounded-2xl'
+        }`}
+      >
+        <Library className={`h-5 w-5 shrink-0 ${LIME}`} />
+        <span className="flex-1 min-w-0 text-left">
+          <span className="block text-white font-sans">Your library</span>
+          <span className="block text-sm text-white/50 truncate">
+            {documents.length} document{documents.length === 1 ? '' : 's'}
+            {attachedCount > 0 && ` · ${attachedCount} added`}
+            {' — '}add any of it without re-uploading
+          </span>
+        </span>
+        <ChevronDown
+          className={`h-4 w-4 shrink-0 text-white/40 transition-transform ${open ? 'rotate-180' : ''}`}
+        />
+      </button>
 
-      {error && <p className="text-sm text-red-300 mb-3">{error}</p>}
+      {/* An error from Add/Delete lives inside this panel, so a collapsed
+          library still surfaces it rather than swallowing the failure. */}
+      {!open && error && (
+        <p className="text-sm text-red-300 mt-2">{error}</p>
+      )}
+
+      {open && (
+      <div className="rounded-b-2xl border border-white/15 border-t-0 bg-white/[0.02] backdrop-blur-xl p-3">
+      {error && <p className="text-sm text-red-300 mb-3 px-1">{error}</p>}
 
       <ul className="space-y-2">
         {documents.map(doc => {
@@ -146,6 +176,8 @@ export function DocumentLibrary({
           )
         })}
       </ul>
+      </div>
+      )}
     </div>
   )
 }

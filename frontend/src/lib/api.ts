@@ -225,8 +225,9 @@ export const api = {
     return response.json();
   },
 
-  async getMyRecentAttempts(): Promise<RecentAttempt[]> {
-    const response = await fetch(`${API_BASE_URL}/me/recent-attempts`, {
+  async getMyRecentAttempts(limit?: number): Promise<RecentAttempt[]> {
+    const query = limit ? `?limit=${limit}` : '';
+    const response = await fetch(`${API_BASE_URL}/me/recent-attempts${query}`, {
       headers: await authHeaders(),
     });
 

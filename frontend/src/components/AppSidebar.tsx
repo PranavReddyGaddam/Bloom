@@ -4,25 +4,41 @@ import { useEffect, useRef, useState } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
 import Image from 'next/image'
 import { api } from '@/lib/api'
-import { RecentAttempt } from '@/types'
-import { PanelLeft, Check } from 'lucide-react'
+import { PanelLeft, Check, Trophy, RefreshCw, Upload } from 'lucide-react'
 
 type SidebarMode = 'expanded' | 'collapsed' | 'hover'
 
 const STORAGE_KEY = 'bloom_sidebar_mode'
 
-export function RecentQuizzesSidebar() {
+const LIME = 'text-[#D7FF3D]'
+
+// App navigation. This used to list raw quiz percentages, which were numbers
+// without context — unreadable when collapsed, and meaningless next to each
+// other. Past scores now live on their own page; the sidebar just points there
+// and carries a badge for work that is actually pending.
+export function AppSidebar() {
   const router = useRouter()
   const pathname = usePathname()
-  const [attempts, setAttempts] = useState<RecentAttempt[]>([])
+  const [dueCount, setDueCount] = useState(0)
   const [mode, setMode] = useState<SidebarMode>('expanded')
   const [mounted, setMounted] = useState(false)
   const [hovering, setHovering] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
+  // How much is waiting to be reviewed, for the badge. Refetched on navigation
+  // so finishing a review session updates the count without a reload.
   useEffect(() => {
-    api.getMyRecentAttempts().then(setAttempts).catch(() => setAttempts([]))
+    let cancelled = false
+    ;(async () => {
+      const [cards, concepts] = await Promise.all([
+        api.getDueFlashcards().catch(() => null),
+        api.getDueConcepts().catch(() => null),
+      ])
+      if (cancelled) return
+      setDueCount((cards?.total_due ?? 0) + (concepts?.concepts.length ?? 0))
+    })()
+    return () => { cancelled = true }
   }, [pathname])
 
   useEffect(() => {
@@ -62,6 +78,12 @@ export function RecentQuizzesSidebar() {
     { value: 'hover', label: 'Expand on hover' },
   ]
 
+  const navItems = [
+    { href: '/upload', label: 'Study', icon: Upload, badge: 0 },
+    { href: '/review', label: 'Review', icon: RefreshCw, badge: dueCount },
+    { href: '/scores', label: 'Scores', icon: Trophy, badge: 0 },
+  ]
+
   return (
     <aside
       className={`hidden md:flex flex-col ${widthClass} shrink-0 h-screen sticky top-0 border-r border-white/10 bg-black/20 backdrop-blur-xl transition-[width] duration-200 overflow-visible`}
@@ -87,38 +109,45 @@ export function RecentQuizzesSidebar() {
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto overflow-x-hidden px-2">
-        {isVisuallyExpanded && (
-          <div className="px-2 py-1 text-xs font-medium text-white/30 uppercase tracking-wide">Recent Quizzes</div>
-        )}
+      <nav className="flex-1 overflow-y-auto overflow-x-hidden px-2">
         <div className="space-y-0.5 mt-1">
-          {attempts.length === 0 ? (
-            isVisuallyExpanded && <p className="px-3 py-2 text-sm text-white/30">No quizzes yet</p>
-          ) : (
-            attempts.map((attempt) => (
+          {navItems.map(item => {
+            const active = pathname === item.href
+            const Icon = item.icon
+            return (
               <button
-                key={attempt.id}
-                onClick={() => router.push(`/quiz/${attempt.id}`)}
-                title={attempt.subject}
-                className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${
-                  pathname === `/quiz/${attempt.id}`
+                key={item.href}
+                onClick={() => router.push(item.href)}
+                title={item.label}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                  active
                     ? 'bg-white/10 text-white'
                     : 'text-white/60 hover:bg-white/5 hover:text-white'
-                }`}
+                } ${isVisuallyExpanded ? '' : 'justify-center'}`}
               >
-                {isVisuallyExpanded ? (
+                <span className="relative shrink-0">
+                  <Icon className={`h-[18px] w-[18px] ${active ? LIME : ''}`} />
+                  {/* Collapsed, the label is gone — the badge becomes a dot so
+                      pending work is still visible at a glance. */}
+                  {!isVisuallyExpanded && item.badge > 0 && (
+                    <span className="absolute -top-1 -right-1 h-2 w-2 rounded-full bg-[#D7FF3D]" />
+                  )}
+                </span>
+                {isVisuallyExpanded && (
                   <>
-                    <div className="truncate">{attempt.subject}</div>
-                    <div className="text-xs text-white/30">{Math.round(attempt.score)}%</div>
+                    <span className="truncate">{item.label}</span>
+                    {item.badge > 0 && (
+                      <span className="ml-auto shrink-0 rounded-full bg-[#D7FF3D] text-black text-xs font-medium px-2 py-0.5 tabular-nums">
+                        {item.badge}
+                      </span>
+                    )}
                   </>
-                ) : (
-                  <div className="text-center text-xs">{Math.round(attempt.score)}</div>
                 )}
               </button>
-            ))
-          )}
+            )
+          })}
         </div>
-      </div>
+      </nav>
 
       <div className="p-3 border-t border-white/10 space-y-2">
         <div className="relative" ref={menuRef}>

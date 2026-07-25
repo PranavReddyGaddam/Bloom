@@ -6,9 +6,7 @@ import { ProfileAvatar } from '@/components/ProfileAvatar'
 import { RotateCcw, ArrowLeft } from 'lucide-react'
 import { StudyBar, Attachment } from './StudyBar'
 import { DocumentLibrary } from './DocumentLibrary'
-import { ReviewDeck } from './ReviewDeck'
-import { ConceptReviewBanner } from './ConceptReviewBanner'
-import { DueConceptReview, StudyFormData } from '@/types'
+import { StudyFormData } from '@/types'
 
 const LIME = 'text-[#D7FF3D]'
 
@@ -26,9 +24,6 @@ interface UploadStepProps {
   // figures (4 of 12 pages)") — replaces the frozen "Processing file..." text.
   progressStage?: string
   resetApp: () => void
-  // Starts a short concept-filtered tutor session on a due concept's
-  // source document (concept spaced repetition).
-  onStartRefresher: (review: DueConceptReview) => Promise<void>
 }
 
 // The app's entry screen. Everything needed to start studying lives on the
@@ -45,8 +40,7 @@ export function UploadStep({
   loading,
   error,
   progressStage,
-  resetApp,
-  onStartRefresher
+  resetApp
 }: UploadStepProps) {
   const router = useRouter()
 
@@ -109,12 +103,9 @@ export function UploadStep({
           error={error}
         />
 
-        {/* Spaced repetition: cards due for review greet returning users */}
-        <ReviewDeck />
-
-        {/* Concept spaced repetition: mastered concepts come back as
-            one-click tutor refreshers when their review interval lapses */}
-        <ConceptReviewBanner onStartRefresher={onStartRefresher} />
+        {/* Due flashcards and concept refreshers used to sit here; they live
+            on /review now, reachable from the sidebar with a pending badge.
+            This screen is for starting something new. */}
 
         {/* Documents library: past uploads, addable to the bar above */}
         <DocumentLibrary

@@ -15,7 +15,6 @@ import {
   TutorSource,
   TutorStartResponse,
   PretestStartResponse,
-  DueConceptReview,
   StudyOutput,
   PRESETS
 } from '@/types'
@@ -33,7 +32,9 @@ interface BloomAppProps {
 const STORED_FILE_KEY = 'bloom-attachments'
 // Active tutor session pointer, so a page refresh can resume the session
 // that is still alive server-side (sessionStorage: gone when the tab closes).
-const TUTOR_SESSION_KEY = 'bloom-tutor-session'
+// Exported because the review page starts refresher sessions and hands off
+// here to run them.
+export const TUTOR_SESSION_KEY = 'bloom-tutor-session'
 
 export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
   const router = useRouter()
@@ -150,6 +151,14 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     focusNote: ''
   })
 
+  // Persist which documents are attached. Ids only — see the restore effect.
+  // Declared before the effects that call it, not just before its other
+  // callers: a `const` referenced above its definition is a runtime error.
+  const rememberAttachments = useCallback((next: Attachment[]) => {
+    if (next.length === 0) localStorage.removeItem(STORED_FILE_KEY)
+    else localStorage.setItem(STORED_FILE_KEY, JSON.stringify(next.map(a => a.documentId)))
+  }, [])
+
   // Restore the attached material across page refreshes.
   //
   // Only document ids are stored, not their text: the text is server-owned and
@@ -200,11 +209,29 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     let cancelled = false
     ;(async () => {
       try {
-        const { id, subjectName } = JSON.parse(stored)
+        const { id, subjectName, documentId: sessionDocId } = JSON.parse(stored)
         const session = await api.getTutorSession(id)
         if (cancelled) return
         if (subjectName) {
           setFormData(prev => ({ ...prev, subjectName }))
+        }
+        // A session started from the review page carries its source document,
+        // so the material is loaded and ready when the student exits back out
+        // — otherwise they'd land on an empty study bar.
+        if (sessionDocId) {
+          try {
+            const content = await api.getDocumentContent(sessionDocId)
+            if (cancelled) return
+            const attachment: Attachment = {
+              documentId: content.id,
+              filename: content.filename,
+              textContent: content.text_content,
+            }
+            setAttachments([attachment])
+            rememberAttachments([attachment])
+          } catch {
+            // Material is a convenience here — the session itself still runs.
+          }
         }
         setTutorSession(session)
         setCurrentStep('tutor')
@@ -213,13 +240,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
       }
     })()
     return () => { cancelled = true }
-  }, [])
-
-  // Persist which documents are attached. Ids only — see the restore effect.
-  const rememberAttachments = useCallback((next: Attachment[]) => {
-    if (next.length === 0) localStorage.removeItem(STORED_FILE_KEY)
-    else localStorage.setItem(STORED_FILE_KEY, JSON.stringify(next.map(a => a.documentId)))
-  }, [])
+  }, [rememberAttachments])
 
   // Upload a file and attach it. Extraction is the slow part, so this reports
   // stage progress; it deliberately does not navigate — the student stays on
@@ -486,40 +507,6 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     }))
   }, [textContent, formData, documentId, sources])
 
-  // Concept spaced repetition: one click on a due concept re-opens its
-  // source document from the library and starts a short tutor session
-  // restricted to that concept. The refresher's results update the
-  // concept's mastery and reschedule its next review server-side.
-  const handleStartRefresher = useCallback(async (review: DueConceptReview) => {
-    const content = await api.getDocumentContent(review.document_id)
-    const subjectName = review.subject || review.concept
-    // The refresher replaces whatever was attached: it's a session about one
-    // specific document, not an addition to a set the student was building.
-    const attachment: Attachment = {
-      documentId: content.id,
-      filename: content.filename,
-      textContent: content.text_content,
-    }
-    setAttachments([attachment])
-    rememberAttachments([attachment])
-    setSimilarDocuments([])
-    setFormData(prev => ({ ...prev, subjectName }))
-    const session = await api.startTutorSession(
-      content.text_content,
-      subjectName,
-      'vibe_check',
-      [review.concept],
-      undefined,
-      content.id
-    )
-    setTutorSession(session)
-    sessionStorage.setItem(TUTOR_SESSION_KEY, JSON.stringify({
-      id: session.session_id,
-      subjectName,
-    }))
-    setCurrentStep('tutor')
-  }, [rememberAttachments])
-
   const handleAnswerSelect = useCallback((questionIndex: number, selectedOption: string) => {
     setUserAnswers(prev => {
       const updated = prev.filter(a => a.questionIndex !== questionIndex)
@@ -582,7 +569,6 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
         error={error}
         progressStage={progressStage}
         resetApp={resetApp}
-        onStartRefresher={handleStartRefresher}
       />
     )
   } else if (currentStep === 'pretest' && pretest) {

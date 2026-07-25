@@ -251,8 +251,11 @@ def get_attempt_recap(attempt_id: str, external_id: str) -> Dict:
 
 
 def get_recent_attempts(external_id: str, limit: int = 20) -> List[Dict]:
-    """Lightweight list of a user's past attempts for a sidebar — just
-    enough to render a clickable list, not the full recap.
+    """Lightweight list of a user's past attempts — just enough to render a
+    clickable list, not the full recap.
+
+    The default suits a short preview; the scores page raises the limit to show
+    a full history.
     """
     client = _get_client()
 
