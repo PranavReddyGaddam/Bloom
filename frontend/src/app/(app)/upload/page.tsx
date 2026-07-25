@@ -6,9 +6,13 @@ import BloomApp from '@/components/BloomApp'
 
 function UploadContent() {
   const searchParams = useSearchParams()
-  const step = searchParams.get('step') || 'upload'
+  // The query string is user-editable, so validate rather than cast — an
+  // unrecognised step (including the retired 'configure') falls back to the
+  // entry screen instead of rendering an undefined branch.
+  const step = searchParams.get('step')
+  const initialStep = step === 'lesson' ? 'lesson' : 'upload'
 
-  return <BloomApp initialStep={step as 'upload' | 'configure' | 'results'} />
+  return <BloomApp initialStep={initialStep} />
 }
 
 export default function UploadPage() {

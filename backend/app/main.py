@@ -148,6 +148,9 @@ async def generate_summary(
     progress_id: Optional[str] = Form(None),
     has_overlap: bool = Form(False),
     focus_concepts: Optional[str] = Form(None),  # JSON array of concept names
+    # Free-text "what do you want to focus on" from the configure step. Passed
+    # to the prompt verbatim — see ai_service._focus_note_block.
+    focus_note: Optional[str] = Form(None),
     user_id: str = Depends(auth.get_current_user_id)
 ):
     """Generate summary from text content"""
@@ -168,6 +171,7 @@ async def generate_summary(
             subject=subject,
             progress=progress.reporter(progress_id),
             weak_concepts=weak_concepts,
+            focus_note=focus_note,
         )
 
         if summary_type == "bullet_points" and "concepts" in summary:
@@ -201,6 +205,7 @@ async def generate_quiz(
     difficulty: str = Form(...),  # "easy", "medium", "hard"
     progress_id: Optional[str] = Form(None),
     has_overlap: bool = Form(False),
+    focus_note: Optional[str] = Form(None),
     user_id: str = Depends(auth.get_current_user_id)
 ):
     """Generate quiz from text content"""
@@ -213,6 +218,7 @@ async def generate_quiz(
             difficulty=difficulty,
             progress=progress.reporter(progress_id),
             weak_concepts=weak_concepts,
+            focus_note=focus_note,
         )
 
         return QuizResponse(
@@ -235,6 +241,8 @@ async def generate_flashcards(
     subject: str = Form(...),
     card_type: str = Form(...),  # "definition", "concept", "fact", "mixed"
     document_id: Optional[str] = Form(None),
+    progress_id: Optional[str] = Form(None),
+    focus_note: Optional[str] = Form(None),
     user_id: str = Depends(auth.get_current_user_id)
 ):
     """Generate flashcards from text content"""
@@ -243,7 +251,9 @@ async def generate_flashcards(
             text_content=text_content,
             num_cards=num_cards,
             subject=subject,
-            card_type=card_type
+            card_type=card_type,
+            progress=progress.reporter(progress_id),
+            focus_note=focus_note,
         )
 
         # Spaced repetition (ROADMAP 4.1): persist the set so the cards come
@@ -266,6 +276,8 @@ async def generate_flashcards(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating flashcards: {str(e)}")
+    finally:
+        progress.clear(progress_id)
 
 @app.get("/me/flashcards/due", response_model=DueFlashcardsResponse)
 async def get_my_due_flashcards(external_user_id: str = Depends(auth.get_current_user_id)):

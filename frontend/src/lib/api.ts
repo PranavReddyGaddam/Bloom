@@ -84,7 +84,8 @@ export const api = {
     subject?: string,
     progressId?: string,
     hasOverlap?: boolean,
-    focusConcepts?: string[]
+    focusConcepts?: string[],
+    focusNote?: string
   ): Promise<SummaryResponse> {
     const formData = new FormData();
     formData.append('text_content', textContent);
@@ -102,6 +103,10 @@ export const api = {
     // coverage in the generated summary.
     if (focusConcepts && focusConcepts.length > 0) {
       formData.append('focus_concepts', JSON.stringify(focusConcepts));
+    }
+    // Free-text steer from the focus bar, passed to the prompt verbatim.
+    if (focusNote && focusNote.trim()) {
+      formData.append('focus_note', focusNote.trim());
     }
 
     const response = await fetch(`${API_BASE_URL}/generate-summary`, {
@@ -124,7 +129,8 @@ export const api = {
     subject: string,
     difficulty: Difficulty,
     progressId?: string,
-    hasOverlap?: boolean
+    hasOverlap?: boolean,
+    focusNote?: string
   ): Promise<QuizResponse> {
     const formData = new FormData();
     formData.append('text_content', textContent);
@@ -136,6 +142,9 @@ export const api = {
     }
     if (hasOverlap) {
       formData.append('has_overlap', 'true');
+    }
+    if (focusNote && focusNote.trim()) {
+      formData.append('focus_note', focusNote.trim());
     }
 
     const response = await fetch(`${API_BASE_URL}/generate-quiz`, {
@@ -417,7 +426,9 @@ export const api = {
     numCards: number,
     subject: string,
     cardType: CardType,
-    documentId?: string | null
+    documentId?: string | null,
+    progressId?: string,
+    focusNote?: string
   ): Promise<FlashcardResponse> {
     const formData = new FormData();
     formData.append('text_content', textContent);
@@ -426,6 +437,12 @@ export const api = {
     formData.append('card_type', cardType);
     if (documentId) {
       formData.append('document_id', documentId);
+    }
+    if (progressId) {
+      formData.append('progress_id', progressId);
+    }
+    if (focusNote && focusNote.trim()) {
+      formData.append('focus_note', focusNote.trim());
     }
 
     const response = await fetch(`${API_BASE_URL}/generate-flashcards`, {

@@ -347,6 +347,47 @@ export interface QuizFormData {
 
 export type CardType = 'definition' | 'concept' | 'fact' | 'mixed';
 
+// What the student asked us to produce from their material. `summary`,
+// `flashcards` and `quiz` are artifacts — passive things that end up as tabs
+// on the lesson screen. `pretest` and `tutor` are interactive flows: selecting
+// them means that flow runs before generation (pretest) or is offered from the
+// lesson (tutor), so neither can be a tab.
+export type StudyOutput = 'summary' | 'flashcards' | 'quiz' | 'pretest' | 'tutor';
+
+// Outputs that become a tab on the lesson screen, in tab order.
+export const ARTIFACT_OUTPUTS: StudyOutput[] = ['summary', 'flashcards', 'quiz'];
+
+export type StudyPreset = 'quick_review' | 'exam_prep' | 'deep_dive' | 'test_first' | 'custom';
+
+// Named starting points for the output selection. The student can toggle any
+// individual output afterwards, which drops them to `custom`.
+export const PRESETS: Record<Exclude<StudyPreset, 'custom'>, {
+  label: string;
+  description: string;
+  outputs: StudyOutput[];
+}> = {
+  quick_review: {
+    label: 'Quick review',
+    description: 'A fast pass over the material',
+    outputs: ['summary', 'flashcards'],
+  },
+  exam_prep: {
+    label: 'Exam prep',
+    description: 'Adds graded practice questions',
+    outputs: ['summary', 'flashcards', 'quiz'],
+  },
+  deep_dive: {
+    label: 'Deep dive',
+    description: 'Mastery-oriented, with the tutor',
+    outputs: ['summary', 'quiz', 'tutor'],
+  },
+  test_first: {
+    label: 'Test me first',
+    description: 'Retrieval practice before you read',
+    outputs: ['pretest', 'summary', 'flashcards'],
+  },
+};
+
 export interface StudyFormData {
   numQuestions: number;
   numCards: number;
@@ -356,6 +397,12 @@ export interface StudyFormData {
   summaryType: SummaryType;
   cardType: CardType;
   tutorMode: TutorMode;
+  // What to generate, and which preset produced that selection.
+  outputs: StudyOutput[];
+  preset: StudyPreset;
+  // Free text from the focus bar — what the student wants emphasized, in their
+  // own words. Empty means "no steer", and generation proceeds as before.
+  focusNote: string;
 }
 
 export interface UserAnswer {

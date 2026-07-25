@@ -231,9 +231,32 @@ The student has studied overlapping material before and previously struggled wit
 Give these concepts extra attention and coverage where the source text supports it.
 """
 
+    def _focus_note_block(self, focus_note: Optional[str]) -> str:
+        """Emphasis hint carrying what the student said they want to focus on,
+        in their own words, from the configure-step focus bar.
+
+        Deliberately kept as raw prose rather than distilled into concept names
+        like _weak_concepts_block: the phrasing itself carries intent that a
+        concept list drops ("just the parts on the exam", "I already know the
+        basics"). Framed as a priority, not a filter — the source text is still
+        the authority on what exists, and a note that matches nothing in the
+        material must not produce an empty artifact."""
+        if not focus_note or not focus_note.strip():
+            return ""
+        note = self._truncate(focus_note.strip(), 500)
+        return f"""
+The student was asked what they want to focus on and said:
+"{note}"
+Prioritise the parts of the source material that serve this. Where the material
+supports it, go deeper on it and lighter elsewhere. If the request is only
+partly covered by the material, cover what is there and do not invent the rest;
+if it is not covered at all, ignore it and proceed normally.
+"""
+
     async def generate_summary(
         self, text_content: str, summary_type: str, subject: Optional[str] = None,
         progress=None, weak_concepts: Optional[List[str]] = None,
+        focus_note: Optional[str] = None,
     ) -> Dict:
         """Generate a summary based on the specified type"""
 
@@ -245,7 +268,7 @@ Give these concepts extra attention and coverage where the source text supports 
         text_content = self._truncate(text_content, 15000)
 
         subject_context = f" in the field of {subject}" if subject else ""
-        emphasis = self._weak_concepts_block(weak_concepts)
+        emphasis = self._weak_concepts_block(weak_concepts) + self._focus_note_block(focus_note)
 
         if summary_type == "short":
             prompt = f"""Create a concise summary of the following text{subject_context}.
@@ -484,6 +507,7 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
     async def generate_quiz(
         self, text_content: str, num_questions: int, subject: str, difficulty: str,
         progress=None, weak_concepts: Optional[List[str]] = None,
+        focus_note: Optional[str] = None,
     ) -> Dict:
         """Generate a quiz based on the text content"""
 
@@ -504,7 +528,7 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
 
         Difficulty level: {difficulty}
         Instructions: {difficulty_instructions[difficulty]}
-        {self._weak_concepts_block(weak_concepts)}
+        {self._weak_concepts_block(weak_concepts)}{self._focus_note_block(focus_note)}
         Content: {text_content}
 
         For each question:
@@ -947,12 +971,19 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
         except:
             return ["general"]
 
-    async def generate_flashcards(self, text_content: str, num_cards: int, subject: str, card_type: str) -> Dict:
+    async def generate_flashcards(
+        self, text_content: str, num_cards: int, subject: str, card_type: str,
+        progress=None, focus_note: Optional[str] = None,
+    ) -> Dict:
         """Generate flashcards based on the text content"""
-        
+
+        def _report(stage: str):
+            if progress:
+                progress(stage)
+
         # Truncate content if too long
         text_content = self._truncate(text_content, 12000)
-        
+
         card_type_instructions = {
             "definition": "Create cards with terms/concepts on the front and their definitions on the back.",
             "concept": "Create cards with conceptual questions on the front and explanations on the back.",
@@ -964,7 +995,7 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
 
         Card type: {card_type}
         Instructions: {card_type_instructions[card_type]}
-        
+        {self._focus_note_block(focus_note)}
         Content: {text_content}
         
         For each flashcard:
@@ -985,12 +1016,13 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
         }}
         
         Make sure flashcards are directly based on the provided content and test key concepts."""
-        
+
         messages = [
             {"role": "system", "content": self.base_system_message},
             {"role": "user", "content": prompt}
         ]
-        
+
+        _report("Writing your flashcards")
         response = await self._make_request(messages)
         
         try:

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { api } from '@/lib/api'
 import { DocumentInfo } from '@/types'
-import { FileText, Trash2, Loader2 } from 'lucide-react'
+import { Check, FileText, Trash2, Loader2, Plus } from 'lucide-react'
 
 const LIME = 'text-[#D7FF3D]'
 
@@ -12,21 +12,24 @@ const LIME = 'text-[#D7FF3D]'
 // this makes that store visible so material can be re-studied without
 // re-uploading the file.
 //
-// Multi-select (ROADMAP_LEARNING 3): material arrives in sets, so 2+ documents
-// can be picked and studied as one combined tutor session. Opening a single
-// document stays a one-click action — checking boxes is the opt-in path.
+// Picking from here is the same action as attaching a file: the document
+// becomes a chip in the study bar. That's what replaced the old "study these
+// together" multi-select — attaching two library documents *is* studying them
+// together, so a second selection mechanism for the same thing was redundant.
 export function DocumentLibrary({
-  onOpen,
-  onStudyTogether,
+  attachedIds,
+  onAdd,
+  onRemove,
 }: {
-  onOpen: (documentId: string) => Promise<void>
-  onStudyTogether?: (documentIds: string[]) => Promise<void>
+  // Document ids currently attached in the study bar, so rows can show their
+  // state rather than duplicating the chips.
+  attachedIds: string[]
+  onAdd: (documentId: string) => Promise<void>
+  onRemove: (documentId: string) => void
 }) {
   const [documents, setDocuments] = useState<DocumentInfo[]>([])
   const [loaded, setLoaded] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
-  const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [startingCombined, setStartingCombined] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
@@ -44,17 +47,17 @@ export function DocumentLibrary({
     return () => { cancelled = true }
   }, [])
 
-  const handleOpen = useCallback(async (documentId: string) => {
+  const handleAdd = useCallback(async (documentId: string) => {
     setBusyId(documentId)
     setError('')
     try {
-      await onOpen(documentId)
+      await onAdd(documentId)
     } catch {
-      setError('Failed to open that document')
+      setError('Failed to add that document')
     } finally {
       setBusyId(null)
     }
-  }, [onOpen])
+  }, [onAdd])
 
   const handleDelete = useCallback(async (documentId: string) => {
     setBusyId(documentId)
@@ -62,42 +65,14 @@ export function DocumentLibrary({
     try {
       await api.deleteDocument(documentId)
       setDocuments(prev => prev.filter(d => d.id !== documentId))
-      setSelected(prev => {
-        if (!prev.has(documentId)) return prev
-        const next = new Set(prev)
-        next.delete(documentId)
-        return next
-      })
+      // A deleted document can't stay attached — its text is gone server-side.
+      onRemove(documentId)
     } catch {
       setError('Failed to delete that document')
     } finally {
       setBusyId(null)
     }
-  }, [])
-
-  const toggleSelected = useCallback((documentId: string) => {
-    setSelected(prev => {
-      const next = new Set(prev)
-      if (next.has(documentId)) next.delete(documentId)
-      else next.add(documentId)
-      return next
-    })
-  }, [])
-
-  const handleStudyTogether = useCallback(async () => {
-    if (!onStudyTogether || selected.size < 2) return
-    setStartingCombined(true)
-    setError('')
-    try {
-      // Library order, not click order: the session should follow the list
-      // the student is looking at.
-      await onStudyTogether(documents.filter(d => selected.has(d.id)).map(d => d.id))
-    } catch {
-      setError('Failed to start a combined session')
-    } finally {
-      setStartingCombined(false)
-    }
-  }, [onStudyTogether, selected, documents])
+  }, [onRemove])
 
   if (!loaded || documents.length === 0) return null
 
@@ -105,78 +80,69 @@ export function DocumentLibrary({
     <div className="mt-10">
       <h2 className="text-lg font-medium text-white mb-1 font-sans">Your library</h2>
       <p className="text-sm text-white/50 mb-4">
-        {onStudyTogether
-          ? 'Everything you’ve uploaded before — study it again, or tick two or more to study them together'
-          : 'Everything you’ve uploaded before — study it again without re-uploading'}
+        Everything you&apos;ve uploaded before — add any of it to what you&apos;re studying,
+        without re-uploading the file
       </p>
 
       {error && <p className="text-sm text-red-300 mb-3">{error}</p>}
 
-      {onStudyTogether && selected.size >= 2 && (
-        <div className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-[#D7FF3D]/30 bg-[#D7FF3D]/[0.06] p-3">
-          <p className="text-sm text-white/80">
-            {selected.size} documents selected — concepts will interleave across them
-          </p>
-          <Button
-            size="sm"
-            onClick={handleStudyTogether}
-            disabled={startingCombined}
-            className="bg-[#D7FF3D] text-black hover:bg-[#D7FF3D]/90 shrink-0"
-          >
-            {startingCombined
-              ? <Loader2 className="h-4 w-4 animate-spin" />
-              : `Study these ${selected.size} together`}
-          </Button>
-        </div>
-      )}
-
       <ul className="space-y-2">
         {documents.map(doc => {
-          // Only the row being opened/deleted locks, plus everything while a
-          // combined session is starting — one slow row shouldn't freeze the
-          // whole list.
-          const busy = busyId === doc.id || startingCombined
+          const attached = attachedIds.includes(doc.id)
+          const busy = busyId === doc.id
           return (
-          <li
-            key={doc.id}
-            className="flex items-center gap-3 rounded-xl border border-white/15 bg-white/[0.04] backdrop-blur-xl p-4"
-          >
-            {onStudyTogether && (
-              <input
-                type="checkbox"
-                checked={selected.has(doc.id)}
-                onChange={() => toggleSelected(doc.id)}
+            <li
+              key={doc.id}
+              className={`flex items-center gap-3 rounded-xl border backdrop-blur-xl p-4 transition-colors ${
+                attached
+                  ? 'border-[#D7FF3D]/40 bg-[#D7FF3D]/[0.06]'
+                  : 'border-white/15 bg-white/[0.04]'
+              }`}
+            >
+              <FileText className={`h-5 w-5 shrink-0 ${LIME}`} />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm text-white truncate">{doc.filename}</p>
+                <p className="text-xs text-white/40">
+                  uploaded {new Date(doc.created_at).toLocaleDateString()} · {doc.chunk_count} sections
+                </p>
+              </div>
+
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => (attached ? onRemove(doc.id) : handleAdd(doc.id))}
                 disabled={busy}
-                aria-label={`Select ${doc.filename} to study with others`}
-                className="h-4 w-4 shrink-0 cursor-pointer accent-[#D7FF3D] disabled:opacity-40"
-              />
-            )}
-            <FileText className={`h-5 w-5 shrink-0 ${LIME}`} />
-            <div className="flex-1 min-w-0">
-              <p className="text-sm text-white truncate">{doc.filename}</p>
-              <p className="text-xs text-white/40">
-                uploaded {new Date(doc.created_at).toLocaleDateString()} · {doc.chunk_count} sections
-              </p>
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => handleOpen(doc.id)}
-              disabled={busy}
-              className="border-white/20 bg-white/5 text-white hover:bg-white/10 hover:text-white shrink-0"
-            >
-              {busyId === doc.id ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Study this again'}
-            </Button>
-            <button
-              type="button"
-              onClick={() => handleDelete(doc.id)}
-              disabled={busy}
-              aria-label={`Delete ${doc.filename}`}
-              className="shrink-0 text-white/40 hover:text-red-300 transition-colors disabled:opacity-40"
-            >
-              <Trash2 className="h-4 w-4" />
-            </button>
-          </li>
+                className={`shrink-0 ${
+                  attached
+                    ? 'border-[#D7FF3D]/50 bg-[#D7FF3D]/10 text-[#D7FF3D] hover:bg-[#D7FF3D]/20 hover:text-[#D7FF3D]'
+                    : 'border-white/20 bg-white/5 text-white hover:bg-white/10 hover:text-white'
+                }`}
+              >
+                {busy ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : attached ? (
+                  <>
+                    <Check className="h-4 w-4 mr-1.5" />
+                    Added
+                  </>
+                ) : (
+                  <>
+                    <Plus className="h-4 w-4 mr-1.5" />
+                    Add
+                  </>
+                )}
+              </Button>
+
+              <button
+                type="button"
+                onClick={() => handleDelete(doc.id)}
+                disabled={busy}
+                aria-label={`Delete ${doc.filename}`}
+                className="shrink-0 text-white/40 hover:text-red-300 transition-colors disabled:opacity-40"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </li>
           )
         })}
       </ul>
