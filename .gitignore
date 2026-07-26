@@ -115,7 +115,7 @@ uploads/
 # Plan files (implementation plans, not part of the app)
 HACKATHON.md
 ROADMAP*.md
-
+MIGRATION_COCKROACHDB.md
 # Claude Code local config
 .claude/
 .mcp.json

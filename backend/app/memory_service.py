@@ -1,9 +1,9 @@
 """Memory layer: per-user vector store over uploaded documents.
 
 On every upload the extracted text is chunked, embedded locally (no API
-call), compared against the user's previously stored chunks in Supabase
-pgvector, and then stored. The comparison result is surfaced to the user as
-"you've already studied similar material in <file>".
+call), compared against the user's previously stored chunks in CockroachDB's
+vector index, and then stored. The comparison result is surfaced to the user
+as "you've already studied similar material in <file>".
 
 Embeddings run locally via fastembed (ONNX, BAAI/bge-small-en-v1.5,
 384-dim) because OpenRouter — the app's only LLM provider — does not serve
@@ -15,7 +15,8 @@ from typing import Dict, List
 
 from fastembed import TextEmbedding
 
-from .db import _get_client, get_or_create_user
+from .database import cursor, retry_on_serialization_failure, to_vector, transaction
+from .db import _lookup_user_id, get_or_create_user
 
 EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"  # 384-dim; must match vector(384) in the schema
 CHUNK_CHARS = 1000
@@ -34,6 +35,11 @@ OVERLAP_RATIO_THRESHOLD = 0.30
 MAX_CHUNKS_CHECKED = 12
 
 MAX_SIMILAR_DOCUMENTS = 3
+
+# Chunk rows per INSERT batch when storing a document. CockroachDB warns that
+# large batched VECTOR inserts degrade performance, and chunk count is
+# unbounded (MAX_CHUNKS_CHECKED caps the overlap check, not storage).
+CHUNKS_PER_INSERT_BATCH = 64
 
 _model: TextEmbedding = None
 
@@ -83,42 +89,51 @@ def _find_similar_documents(user_id: str, embeddings: List[List[float]]) -> List
     """Match a new upload's chunk embeddings against the user's stored
     chunks and aggregate matches per prior document.
     """
-    client = _get_client()
     checked = embeddings[:MAX_CHUNKS_CHECKED]
 
     # document_id -> {"filename", "uploaded_at", "matched", "best_similarity"}
     matches: Dict[str, Dict] = {}
-    for embedding in checked:
-        rows = client.rpc("match_document_chunks", {
-            "query_embedding": embedding,
-            "target_user_id": user_id,
-            "match_threshold": SIMILARITY_THRESHOLD,
-            "match_count": 3,
-        }).execute().data or []
+    # One query per chunk (up to MAX_CHUNKS_CHECKED). Kept as a loop to match
+    # the previous behavior exactly; collapsing it into a single query is a
+    # worthwhile follow-up but changes result semantics, so not in this port.
+    with cursor() as cur:
+        for embedding in checked:
+            cur.execute(
+                "SELECT * FROM match_document_chunks(%s, %s, %s, %s)",
+                (to_vector(embedding), user_id, SIMILARITY_THRESHOLD, 3),
+            )
+            rows = cur.fetchall()
 
-        # Count each prior document at most once per new chunk.
-        seen_this_chunk = set()
-        for row in rows:
-            doc_id = row["document_id"]
-            entry = matches.setdefault(doc_id, {
-                "filename": row["filename"],
-                "uploaded_at": row["uploaded_at"],
-                "matched": 0,
-                "best_similarity": 0.0,
-            })
-            if doc_id not in seen_this_chunk:
-                entry["matched"] += 1
-                seen_this_chunk.add(doc_id)
-            entry["best_similarity"] = max(entry["best_similarity"], row["similarity"])
+            # Count each prior document at most once per new chunk.
+            seen_this_chunk = set()
+            for row in rows:
+                # psycopg returns uuid columns as UUID objects; the key is
+                # compared against document ids elsewhere and surfaced to the
+                # frontend, both of which expect strings.
+                doc_id = str(row["document_id"])
+                entry = matches.setdefault(doc_id, {
+                    "filename": row["filename"],
+                    "uploaded_at": row["uploaded_at"],
+                    "matched": 0,
+                    "best_similarity": 0.0,
+                })
+                if doc_id not in seen_this_chunk:
+                    entry["matched"] += 1
+                    seen_this_chunk.add(doc_id)
+                entry["best_similarity"] = max(entry["best_similarity"], row["similarity"])
 
     similar = []
     for doc_id, entry in matches.items():
         overlap = entry["matched"] / len(checked)
         if overlap >= OVERLAP_RATIO_THRESHOLD:
+            uploaded_at = entry["uploaded_at"]
             similar.append({
                 "document_id": doc_id,
                 "filename": entry["filename"],
-                "uploaded_at": entry["uploaded_at"],
+                # datetime from psycopg where supabase-py returned a string;
+                # SimilarDocument declares uploaded_at: str.
+                "uploaded_at": uploaded_at.isoformat().replace("+00:00", "Z")
+                if hasattr(uploaded_at, "isoformat") else uploaded_at,
                 "similarity": round(entry["best_similarity"], 3),
                 "overlap": round(overlap, 3),
             })
@@ -127,10 +142,16 @@ def _find_similar_documents(user_id: str, embeddings: List[List[float]]) -> List
     return similar[:MAX_SIMILAR_DOCUMENTS]
 
 
+@retry_on_serialization_failure
 def _store_document(user_id: str, filename: str, chunks: List[str], embeddings: List[List[float]]) -> str:
     """Persist a document and its chunk embeddings, replacing the content of
     any earlier upload with the same filename so re-uploads don't accumulate
     stale copies. Returns the document id.
+
+    The whole operation is one transaction. Previously the DELETE and the
+    INSERT were independent calls, so a failure between them left a document
+    row with zero chunks — the library would list the file while opening it
+    returned empty text.
 
     Re-uploading reuses the existing row and swaps only its chunks, so the
     document id is stable across re-uploads. That matters because the id is
@@ -139,40 +160,41 @@ def _store_document(user_id: str, filename: str, chunks: List[str], embeddings: 
     client's stored pointer to the material being studied. Deleting and
     re-inserting would mint a new id and silently orphan all of them.
     """
-    client = _get_client()
+    with transaction() as cur:
+        cur.execute(
+            "SELECT id FROM documents WHERE user_id = %s AND filename = %s",
+            (user_id, filename),
+        )
+        existing = cur.fetchone()
 
-    existing = (
-        client.table("documents")
-        .select("id")
-        .eq("user_id", user_id)
-        .eq("filename", filename)
-        .execute()
-        .data
-    )
+        if existing:
+            document_id = str(existing["id"])
+            # Same document, new content: drop the old chunks (they're replaced
+            # wholesale below — a shorter re-upload must not leave a tail of
+            # stale chunks behind) and keep the row itself.
+            cur.execute("DELETE FROM document_chunks WHERE document_id = %s", (document_id,))
+        else:
+            cur.execute(
+                "INSERT INTO documents (user_id, filename) VALUES (%s, %s) RETURNING id",
+                (user_id, filename),
+            )
+            document_id = str(cur.fetchone()["id"])
 
-    if existing:
-        document_id = existing[0]["id"]
-        # Same document, new content: drop the old chunks (they're replaced
-        # wholesale below — a shorter re-upload must not leave a tail of
-        # stale chunks behind) and keep the row itself.
-        client.table("document_chunks").delete().eq("document_id", document_id).execute()
-    else:
-        document = client.table("documents").insert({
-            "user_id": user_id,
-            "filename": filename,
-        }).execute()
-        document_id = document.data[0]["id"]
-
-    client.table("document_chunks").insert([
-        {
-            "document_id": document_id,
-            "user_id": user_id,
-            "chunk_index": index,
-            "content": chunk,
-            "embedding": embedding,
-        }
-        for index, (chunk, embedding) in enumerate(zip(chunks, embeddings))
-    ]).execute()
+        # Batched rather than one statement for the whole document. CockroachDB
+        # documents that large batched VECTOR inserts degrade performance, and
+        # nothing caps the chunk count — MAX_CHUNKS_CHECKED bounds the overlap
+        # check only, so a long upload can produce hundreds of chunks.
+        rows = [
+            (document_id, user_id, index, chunk, to_vector(embedding))
+            for index, (chunk, embedding) in enumerate(zip(chunks, embeddings))
+        ]
+        for start in range(0, len(rows), CHUNKS_PER_INSERT_BATCH):
+            cur.executemany(
+                "INSERT INTO document_chunks"
+                " (document_id, user_id, chunk_index, content, embedding)"
+                " VALUES (%s,%s,%s,%s,%s)",
+                rows[start:start + CHUNKS_PER_INSERT_BATCH],
+            )
 
     return document_id
 
@@ -217,11 +239,9 @@ MAX_WEAK_CONCEPTS = 3
 
 
 def _weak_concepts_for_text_sync(external_user_id: str, text: str) -> List[str]:
-    client = _get_client()
-    user = client.table("users").select("id").eq("external_id", external_user_id).execute()
-    if not user.data:
+    user_id = _lookup_user_id(external_user_id)
+    if not user_id:
         return []
-    user_id = user.data[0]["id"]
 
     # A few chunks are enough to characterize the material's topics.
     chunks = _chunk_text(text)[:3]
@@ -229,16 +249,15 @@ def _weak_concepts_for_text_sync(external_user_id: str, text: str) -> List[str]:
         return []
 
     found: Dict[str, float] = {}  # concept -> mastery
-    for embedding in _embed(chunks):
-        rows = client.rpc("match_weak_concepts", {
-            "query_embedding": embedding,
-            "target_user_id": user_id,
-            "mastery_below": WEAK_CONCEPT_MASTERY_BELOW,
-            "match_threshold": WEAK_CONCEPT_SIMILARITY_THRESHOLD,
-            "match_count": MAX_WEAK_CONCEPTS,
-        }).execute().data or []
-        for row in rows:
-            found.setdefault(row["concept"], row["mastery"])
+    with cursor() as cur:
+        for embedding in _embed(chunks):
+            cur.execute(
+                "SELECT * FROM match_weak_concepts(%s, %s, %s, %s, %s)",
+                (to_vector(embedding), user_id, WEAK_CONCEPT_MASTERY_BELOW,
+                 WEAK_CONCEPT_SIMILARITY_THRESHOLD, MAX_WEAK_CONCEPTS),
+            )
+            for row in cur.fetchall():
+                found.setdefault(row["concept"], row["mastery"])
 
     weakest = sorted(found.items(), key=lambda item: item[1])[:MAX_WEAK_CONCEPTS]
     return [concept for concept, _ in weakest]

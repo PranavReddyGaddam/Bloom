@@ -1,39 +1,87 @@
-import os
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
-from supabase import create_client, Client
 
+from psycopg.types.json import Jsonb
+
+from .database import cursor, transaction, retry_on_serialization_failure, to_vector, from_vector
 from .models import QuizQuestion
 
 PLACEHOLDER_USER_ID = "00000000-0000-0000-0000-000000000001"
 
-_client: Client = None
+
+def _row(row: Optional[Dict]) -> Optional[Dict]:
+    """Normalize one psycopg row to the shape supabase-py returned.
+
+    psycopg returns native Python types where supabase-py returned JSON
+    scalars: `uuid.UUID` for uuid columns and `datetime` for timestamptz.
+    The API models declare `id: str` / `created_at: str` (models.py:97-100)
+    and pydantic v2 is strict, so handing them a UUID or datetime raises
+    ValidationError and the endpoint 500s.
+
+    Converting here rather than loosening the models keeps this migration a
+    pure data-layer change — callers and response schemas stay untouched,
+    which is the invariant the whole port is built on.
+    """
+    if row is None:
+        return None
+    out = {}
+    for key, value in row.items():
+        if isinstance(value, uuid.UUID):
+            out[key] = str(value)
+        elif isinstance(value, datetime):
+            # Supabase rendered timestamptz as ISO-8601 with a 'Z' suffix;
+            # match it exactly so frontend date parsing is unaffected.
+            out[key] = value.isoformat().replace("+00:00", "Z")
+        else:
+            out[key] = value
+    return out
 
 
-def _get_client() -> Client:
-    global _client
-    if _client is None:
-        url = os.getenv("SUPABASE_URL")
-        key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-        if not url or not key:
-            raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables are required")
-        _client = create_client(url, key)
-    return _client
+def _rows(rows: List[Dict]) -> List[Dict]:
+    """_row() over a result set."""
+    return [_row(r) for r in rows]
+
+
+def _lookup_user_id(external_id: str) -> Optional[str]:
+    """public.users.id for an external_id, or None if the user has no row yet.
+
+    Replaces the `client.table("users").select("id").eq(...)` preamble that
+    opened most read functions. Callers that must not create a user (every
+    read path) use this; get_or_create_user() is for write paths.
+    """
+    with cursor() as cur:
+        cur.execute("SELECT id FROM users WHERE external_id = %s", (external_id,))
+        row = cur.fetchone()
+        return str(row["id"]) if row else None
 
 
 def get_or_create_user(external_id: str) -> str:
     """Look up the public.users row for a Supabase Auth user, creating one
     on first sight. Returns the public.users.id (not the external_id).
     """
-    client = _get_client()
+    with cursor() as cur:
+        cur.execute("SELECT id FROM users WHERE external_id = %s", (external_id,))
+        row = cur.fetchone()
+        if row:
+            return str(row["id"])
 
-    existing = client.table("users").select("id").eq("external_id", external_id).execute()
-    if existing.data:
-        return existing.data[0]["id"]
+        # ON CONFLICT closes a read-then-write race the Supabase version had:
+        # two concurrent first-requests for the same user could both miss the
+        # SELECT and then both INSERT, and external_id is UNIQUE. DO NOTHING
+        # returns no row on conflict, so re-SELECT to get the winner's id.
+        cur.execute(
+            "INSERT INTO users (external_id) VALUES (%s)"
+            " ON CONFLICT (external_id) DO NOTHING RETURNING id",
+            (external_id,),
+        )
+        row = cur.fetchone()
+        if row:
+            return str(row["id"])
 
-    created = client.table("users").insert({"external_id": external_id}).execute()
-    return created.data[0]["id"]
+        cur.execute("SELECT id FROM users WHERE external_id = %s", (external_id,))
+        return str(cur.fetchone()["id"])
 
 
 def create_subject(external_id: str, name: str) -> Dict:
@@ -41,42 +89,54 @@ def create_subject(external_id: str, name: str) -> Dict:
     subject with this name (case-insensitive) already exists — idempotent
     "create or get" so the frontend doesn't need a separate existence check.
     """
-    client = _get_client()
     user_id = get_or_create_user(external_id)
-
     name = name.strip()
-    existing = (
-        client.table("subjects")
-        .select("id, name, created_at")
-        .eq("user_id", user_id)
-        .ilike("name", name)
-        .execute()
-        .data
-    )
-    if existing:
-        return existing[0]
 
-    created = client.table("subjects").insert({"user_id": user_id, "name": name}).execute()
-    return created.data[0]
+    with cursor() as cur:
+        cur.execute(
+            "SELECT id, name, created_at FROM subjects"
+            " WHERE user_id = %s AND name ILIKE %s",
+            (user_id, name),
+        )
+        existing = cur.fetchone()
+        if existing:
+            return _row(existing)
+
+        # The unique constraint is (user_id, name) — case-SENSITIVE — while the
+        # lookup above is case-insensitive, so ON CONFLICT narrows the race but
+        # cannot close it for names differing only in case. Matches the
+        # Supabase behavior; a same-case race now resolves to the existing row
+        # instead of raising.
+        cur.execute(
+            "INSERT INTO subjects (user_id, name) VALUES (%s, %s)"
+            " ON CONFLICT (user_id, name) DO NOTHING"
+            " RETURNING id, name, created_at",
+            (user_id, name),
+        )
+        created = cur.fetchone()
+        if created:
+            return _row(created)
+
+        cur.execute(
+            "SELECT id, name, created_at FROM subjects"
+            " WHERE user_id = %s AND name ILIKE %s",
+            (user_id, name),
+        )
+        return _row(cur.fetchone())
 
 
 def list_subjects(external_id: str) -> List[Dict]:
     """All subjects owned by the requesting user."""
-    client = _get_client()
-
-    user = client.table("users").select("id").eq("external_id", external_id).execute()
-    if not user.data:
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
         return []
-    user_id = user.data[0]["id"]
 
-    return (
-        client.table("subjects")
-        .select("id, name, created_at")
-        .eq("user_id", user_id)
-        .order("name")
-        .execute()
-        .data
-    )
+    with cursor() as cur:
+        cur.execute(
+            "SELECT id, name, created_at FROM subjects WHERE user_id = %s ORDER BY name",
+            (user_id,),
+        )
+        return _rows(cur.fetchall())
 
 
 def delete_subject(subject_id: str, external_id: str) -> bool:
@@ -85,19 +145,61 @@ def delete_subject(subject_id: str, external_id: str) -> bool:
     survive and fall into "Uncategorized" in subject-grouped views, never
     deleted themselves.
     """
-    client = _get_client()
-
-    user = client.table("users").select("id").eq("external_id", external_id).execute()
-    if not user.data:
-        return False
-    user_id = user.data[0]["id"]
-
-    subject = client.table("subjects").select("id").eq("id", subject_id).eq("user_id", user_id).execute()
-    if not subject.data:
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
         return False
 
-    client.table("subjects").delete().eq("id", subject_id).execute()
-    return True
+    with cursor() as cur:
+        # Ownership is enforced in the DELETE's own predicate rather than by a
+        # preceding SELECT: one statement, and no window between check and
+        # delete. RETURNING tells us whether a row actually matched.
+        cur.execute(
+            "DELETE FROM subjects WHERE id = %s AND user_id = %s RETURNING id",
+            (subject_id, user_id),
+        )
+        return cur.fetchone() is not None
+
+
+@retry_on_serialization_failure
+def _persist_quiz_attempt(
+    user_id: str,
+    subject_id: str,
+    subject_name: str,
+    difficulty: str,
+    total_questions: int,
+    score: float,
+    per_question: List[Dict],
+) -> str:
+    """Write the attempt and its question rows atomically.
+
+    Supabase issued these as two independent calls, so a failure between them
+    left an attempt with no questions — a row that renders as an empty recap.
+    One transaction makes that impossible. Retried on serialization failure:
+    the whole body re-runs from a clean rollback, so it is safe to repeat.
+    """
+    with transaction() as cur:
+        cur.execute(
+            "INSERT INTO quiz_attempts"
+            " (user_id, subject_id, subject, difficulty, total_questions, score)"
+            " VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+            (user_id, subject_id, subject_name, difficulty, total_questions, score),
+        )
+        attempt_id = str(cur.fetchone()["id"])
+
+        if per_question:
+            cur.executemany(
+                "INSERT INTO question_attempts"
+                " (quiz_attempt_id, question_text, category, difficulty,"
+                "  user_answer, correct_answer, is_correct, question_index)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                [
+                    (attempt_id, q["question_text"], q["category"], q["difficulty"],
+                     q["user_answer"], q["correct_answer"], q["is_correct"],
+                     q["question_index"])
+                    for q in per_question
+                ],
+            )
+        return attempt_id
 
 
 def record_quiz_attempt(
@@ -111,10 +213,10 @@ def record_quiz_attempt(
     the same aggregate result shape the frontend already expects, plus the
     new attempt_id.
     """
-    client = _get_client()
-
-    subject_row = client.table("subjects").select("name").eq("id", subject_id).execute().data
-    subject_name = subject_row[0]["name"] if subject_row else "Uncategorized"
+    with cursor() as cur:
+        cur.execute("SELECT name FROM subjects WHERE id = %s", (subject_id,))
+        subject_row = cur.fetchone()
+    subject_name = subject_row["name"] if subject_row else "Uncategorized"
 
     per_question = []
     correct_count = 0
@@ -150,19 +252,10 @@ def record_quiz_attempt(
 
     attempt_id = None
     try:
-        attempt_result = client.table("quiz_attempts").insert({
-            "user_id": user_id,
-            "subject_id": subject_id,
-            "subject": subject_name,
-            "difficulty": difficulty,
-            "total_questions": total_questions,
-            "score": score,
-        }).execute()
-        attempt_id = attempt_result.data[0]["id"]
-
-        for row in per_question:
-            row["quiz_attempt_id"] = attempt_id
-        client.table("question_attempts").insert(per_question).execute()
+        attempt_id = _persist_quiz_attempt(
+            user_id, subject_id, subject_name, difficulty,
+            total_questions, score, per_question,
+        )
     except Exception:
         # Persistence is a quality-of-life addition, not a correctness
         # dependency — a DB failure should never block the user from seeing
@@ -184,8 +277,13 @@ def get_attempt_breakdown(attempt_id: str) -> Dict:
     """Aggregate a single attempt's question_attempts by category and by
     difficulty, for rendering real "performance by X" panels.
     """
-    client = _get_client()
-    rows = client.table("question_attempts").select("category, difficulty, is_correct").eq("quiz_attempt_id", attempt_id).execute().data
+    with cursor() as cur:
+        cur.execute(
+            "SELECT category, difficulty, is_correct FROM question_attempts"
+            " WHERE quiz_attempt_id = %s",
+            (attempt_id,),
+        )
+        rows = cur.fetchall()
 
     def aggregate(key: str) -> List[Dict]:
         buckets: Dict[str, List[int]] = {}
@@ -195,9 +293,11 @@ def get_attempt_breakdown(attempt_id: str) -> Dict:
             buckets[label][1] += 1
             if row["is_correct"]:
                 buckets[label][0] += 1
+        # Sorted so the panels render in a stable order regardless of the
+        # order the database returned rows in.
         return [
             {"label": label, "correct": correct, "total": total}
-            for label, (correct, total) in buckets.items()
+            for label, (correct, total) in sorted(buckets.items())
         ]
 
     return {
@@ -212,33 +312,33 @@ def get_attempt_recap(attempt_id: str, external_id: str) -> Dict:
     correctness. Scoped to the requesting user — returns None if the
     attempt doesn't belong to them (or doesn't exist).
     """
-    client = _get_client()
-
-    user = client.table("users").select("id").eq("external_id", external_id).execute()
-    if not user.data:
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
         return None
-    user_id = user.data[0]["id"]
 
-    attempt = (
-        client.table("quiz_attempts")
-        .select("id, subject, difficulty, score, total_questions, created_at, user_id")
-        .eq("id", attempt_id)
-        .execute()
-        .data
-    )
-    if not attempt or attempt[0]["user_id"] != user_id:
-        return None
-    attempt = attempt[0]
+    with cursor() as cur:
+        # Ownership folded into the WHERE clause rather than compared in
+        # Python afterwards — same result, one fewer round trip, and no way
+        # to forget the check.
+        cur.execute(
+            "SELECT id, subject, difficulty, score, total_questions, created_at"
+            " FROM quiz_attempts WHERE id = %s AND user_id = %s",
+            (attempt_id, user_id),
+        )
+        attempt = cur.fetchone()
+        if not attempt:
+            return None
 
-    questions = (
-        client.table("question_attempts")
-        .select("question_text, category, difficulty, user_answer, correct_answer, is_correct, question_index")
-        .eq("quiz_attempt_id", attempt_id)
-        .order("question_index")
-        .execute()
-        .data
-    )
+        cur.execute(
+            "SELECT question_text, category, difficulty, user_answer,"
+            " correct_answer, is_correct, question_index"
+            " FROM question_attempts WHERE quiz_attempt_id = %s"
+            " ORDER BY question_index",
+            (attempt_id,),
+        )
+        questions = _rows(cur.fetchall())
 
+    attempt = _row(attempt)
     return {
         "id": attempt["id"],
         "subject": attempt["subject"],
@@ -257,22 +357,18 @@ def get_recent_attempts(external_id: str, limit: int = 20) -> List[Dict]:
     The default suits a short preview; the scores page raises the limit to show
     a full history.
     """
-    client = _get_client()
-
-    user = client.table("users").select("id").eq("external_id", external_id).execute()
-    if not user.data:
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
         return []
-    user_id = user.data[0]["id"]
 
-    return (
-        client.table("quiz_attempts")
-        .select("id, subject, difficulty, score, total_questions, created_at")
-        .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
-        .data
-    )
+    with cursor() as cur:
+        cur.execute(
+            "SELECT id, subject, difficulty, score, total_questions, created_at"
+            " FROM quiz_attempts WHERE user_id = %s"
+            " ORDER BY created_at DESC LIMIT %s",
+            (user_id, limit),
+        )
+        return _rows(cur.fetchall())
 
 
 def get_user_stats(external_id: str) -> Dict:
@@ -280,48 +376,67 @@ def get_user_stats(external_id: str) -> Dict:
     profile screen. Real numbers only — no attempts yet means zeros, not
     placeholder data.
     """
-    client = _get_client()
-
-    user = client.table("users").select("id").eq("external_id", external_id).execute()
-    if not user.data:
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
         return {"total_attempts": 0, "average_score": 0.0, "best_category": None, "recent_attempts": []}
 
-    user_id = user.data[0]["id"]
-
-    attempts = (
-        client.table("quiz_attempts")
-        .select("id, subject, difficulty, score, total_questions, created_at")
-        .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .execute()
-        .data
-    )
-
-    total_attempts = len(attempts)
-    average_score = sum(a["score"] for a in attempts) / total_attempts if total_attempts else 0.0
-
-    best_category = None
-    if total_attempts:
-        attempt_ids = [a["id"] for a in attempts]
-        questions = (
-            client.table("question_attempts")
-            .select("category, is_correct")
-            .in_("quiz_attempt_id", attempt_ids)
-            .execute()
-            .data
+    with cursor() as cur:
+        cur.execute(
+            "SELECT id, subject, difficulty, score, total_questions, created_at"
+            " FROM quiz_attempts WHERE user_id = %s ORDER BY created_at DESC",
+            (user_id,),
         )
-        buckets: Dict[str, List[int]] = {}
-        for row in questions:
-            label = row.get("category") or "Uncategorized"
-            correct, total = buckets.setdefault(label, [0, 0])
-            buckets[label][1] += 1
-            if row["is_correct"]:
-                buckets[label][0] += 1
-        if buckets:
-            best_category = max(
-                buckets.items(),
-                key=lambda item: (item[1][0] / item[1][1], item[1][1])
-            )[0]
+        attempts = _rows(cur.fetchall())
+
+        total_attempts = len(attempts)
+        average_score = sum(a["score"] for a in attempts) / total_attempts if total_attempts else 0.0
+
+        best_category = None
+        if total_attempts:
+            attempt_ids = [a["id"] for a in attempts]
+            # `= ANY(%s)` passes the ids as ONE array parameter. The Supabase
+            # `.in_()` expanded to an inline list that grows without bound as
+            # history accumulates — a genuine CockroachDB anti-pattern.
+            # ORDER BY is load-bearing, not cosmetic: best_category below
+            # breaks ties with max(), which returns the first maximum it
+            # sees. Without a stable row order two categories tied at 1/1
+            # resolve differently run to run — Supabase and CockroachDB
+            # disagreed here, and Supabase alone was never guaranteed either.
+            cur.execute(
+                "SELECT category, is_correct FROM question_attempts"
+                " WHERE quiz_attempt_id = ANY(%s)"
+                " ORDER BY category NULLS FIRST, id",
+                (attempt_ids,),
+            )
+            questions = cur.fetchall()
+
+            buckets: Dict[str, List[int]] = {}
+            for row in questions:
+                label = row.get("category") or "Uncategorized"
+                correct, total = buckets.setdefault(label, [0, 0])
+                buckets[label][1] += 1
+                if row["is_correct"]:
+                    buckets[label][0] += 1
+            if buckets:
+                # Rank by accuracy, then by sample size, then alphabetically
+                # (reversed, so ties resolve to the first name alphabetically
+                # rather than the last).
+                #
+                # The tiebreak matters more than it looks: on real data ten
+                # categories sit tied at 1/1, so "best" was decided purely by
+                # whatever order the database returned rows in — it differed
+                # between Supabase and CockroachDB and was never stable on
+                # either. The sample-size key means a category answered 5/5
+                # now outranks one answered 1/1, which is also the more honest
+                # answer to "what are you best at".
+                best_category = min(
+                    buckets.items(),
+                    key=lambda item: (
+                        -(item[1][0] / item[1][1]),  # highest accuracy first
+                        -item[1][1],                 # then most questions
+                        item[0],                     # then alphabetical
+                    ),
+                )[0]
 
     return {
         "total_attempts": total_attempts,
@@ -338,10 +453,8 @@ def get_user_analytics(external_id: str) -> Dict:
     real, all-time aggregates — empty lists when there's no history yet,
     never fabricated data.
     """
-    client = _get_client()
-
-    user = client.table("users").select("id").eq("external_id", external_id).execute()
-    if not user.data:
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
         return {
             "score_trend": [],
             "by_category": [],
@@ -350,16 +463,13 @@ def get_user_analytics(external_id: str) -> Dict:
             "by_subject_accuracy": [],
         }
 
-    user_id = user.data[0]["id"]
-
-    attempts = (
-        client.table("quiz_attempts")
-        .select("id, subject, difficulty, score, total_questions, created_at")
-        .eq("user_id", user_id)
-        .order("created_at")
-        .execute()
-        .data
-    )
+    with cursor() as cur:
+        cur.execute(
+            "SELECT id, subject, difficulty, score, total_questions, created_at"
+            " FROM quiz_attempts WHERE user_id = %s ORDER BY created_at",
+            (user_id,),
+        )
+        attempts = _rows(cur.fetchall())
 
     score_trend = [
         {
@@ -374,7 +484,7 @@ def get_user_analytics(external_id: str) -> Dict:
     subject_counts: Dict[str, int] = {}
     for a in attempts:
         subject_counts[a["subject"]] = subject_counts.get(a["subject"], 0) + 1
-    by_subject = [{"label": label, "count": count} for label, count in subject_counts.items()]
+    by_subject = [{"label": label, "count": count} for label, count in sorted(subject_counts.items())]
 
     by_category: List[Dict] = []
     by_difficulty: List[Dict] = []
@@ -382,13 +492,17 @@ def get_user_analytics(external_id: str) -> Dict:
     if attempts:
         attempt_subject_by_id = {a["id"]: a["subject"] for a in attempts}
         attempt_ids = list(attempt_subject_by_id.keys())
-        questions = (
-            client.table("question_attempts")
-            .select("quiz_attempt_id, category, difficulty, is_correct")
-            .in_("quiz_attempt_id", attempt_ids)
-            .execute()
-            .data
-        )
+        with cursor() as cur:
+            cur.execute(
+                "SELECT quiz_attempt_id, category, difficulty, is_correct"
+                " FROM question_attempts WHERE quiz_attempt_id = ANY(%s)",
+                (attempt_ids,),
+            )
+            # quiz_attempt_id is joined back to attempt_subject_by_id below,
+            # whose keys came through _rows() as strings — so these must be
+            # strings too or every lookup silently misses and every bucket
+            # falls into "Uncategorized".
+            questions = _rows(cur.fetchall())
 
         def aggregate(key: str) -> List[Dict]:
             buckets: Dict[str, List[int]] = {}
@@ -400,7 +514,7 @@ def get_user_analytics(external_id: str) -> Dict:
                     buckets[label][0] += 1
             return [
                 {"label": label, "correct": correct, "total": total, "accuracy": round((correct / total) * 100, 1)}
-                for label, (correct, total) in buckets.items()
+                for label, (correct, total) in sorted(buckets.items())
             ]
 
         by_category = aggregate("category")
@@ -415,7 +529,7 @@ def get_user_analytics(external_id: str) -> Dict:
                 subject_buckets[label][0] += 1
         by_subject_accuracy = [
             {"label": label, "correct": correct, "total": total, "accuracy": round((correct / total) * 100, 1)}
-            for label, (correct, total) in subject_buckets.items()
+            for label, (correct, total) in sorted(subject_buckets.items())
         ]
 
     return {
@@ -434,72 +548,53 @@ def get_user_analytics(external_id: str) -> Dict:
 
 def list_documents(external_id: str) -> List[Dict]:
     """All of a user's stored uploads, newest first, with chunk counts."""
-    client = _get_client()
-
-    user = client.table("users").select("id").eq("external_id", external_id).execute()
-    if not user.data:
-        return []
-    user_id = user.data[0]["id"]
-
-    documents = (
-        client.table("documents")
-        .select("id, filename, created_at")
-        .eq("user_id", user_id)
-        .order("created_at", desc=True)
-        .execute()
-        .data
-    )
-    if not documents:
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
         return []
 
-    chunk_rows = (
-        client.table("document_chunks")
-        .select("document_id")
-        .eq("user_id", user_id)
-        .execute()
-        .data
-    )
-    counts: Dict[str, int] = {}
-    for row in chunk_rows:
-        counts[row["document_id"]] = counts.get(row["document_id"], 0) + 1
-
-    return [
-        {**doc, "chunk_count": counts.get(doc["id"], 0)}
-        for doc in documents
-    ]
+    with cursor() as cur:
+        # The chunk count is a GROUP BY in the database now. Supabase fetched
+        # every chunk row for the user and counted them in Python — fine at 95
+        # chunks, but it grows with the corpus while only the counts are used.
+        # LEFT JOIN so a document with zero chunks still appears, matching the
+        # counts.get(doc["id"], 0) default it replaces.
+        cur.execute(
+            "SELECT d.id, d.filename, d.created_at, count(dc.id) AS chunk_count"
+            " FROM documents d"
+            " LEFT JOIN document_chunks dc ON dc.document_id = d.id"
+            " WHERE d.user_id = %s"
+            " GROUP BY d.id, d.filename, d.created_at"
+            " ORDER BY d.created_at DESC",
+            (user_id,),
+        )
+        return _rows(cur.fetchall())
 
 
 def get_document_content(document_id: str, external_id: str) -> Optional[Dict]:
     """Re-hydrate a stored document's text by reassembling its chunks in
     order, so the user can study last week's upload without re-uploading.
     Ownership-scoped; returns None for foreign/unknown documents."""
-    client = _get_client()
-
-    user = client.table("users").select("id").eq("external_id", external_id).execute()
-    if not user.data:
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
         return None
-    user_id = user.data[0]["id"]
 
-    document = (
-        client.table("documents")
-        .select("id, filename, created_at")
-        .eq("id", document_id)
-        .eq("user_id", user_id)
-        .execute()
-        .data
-    )
-    if not document:
-        return None
-    document = document[0]
+    with cursor() as cur:
+        cur.execute(
+            "SELECT id, filename, created_at FROM documents"
+            " WHERE id = %s AND user_id = %s",
+            (document_id, user_id),
+        )
+        document = cur.fetchone()
+        if not document:
+            return None
+        document = _row(document)
 
-    chunks = (
-        client.table("document_chunks")
-        .select("chunk_index, content")
-        .eq("document_id", document_id)
-        .order("chunk_index")
-        .execute()
-        .data
-    )
+        cur.execute(
+            "SELECT chunk_index, content FROM document_chunks"
+            " WHERE document_id = %s ORDER BY chunk_index",
+            (document_id,),
+        )
+        chunks = cur.fetchall()
     text_content = "\n\n".join(chunk["content"] for chunk in chunks)
 
     return {
@@ -514,19 +609,16 @@ def get_document_content(document_id: str, external_id: str) -> Optional[Dict]:
 def delete_document(document_id: str, external_id: str) -> bool:
     """Ownership-scoped document delete; chunks go with it (ON DELETE
     CASCADE on document_chunks.document_id)."""
-    client = _get_client()
-
-    user = client.table("users").select("id").eq("external_id", external_id).execute()
-    if not user.data:
-        return False
-    user_id = user.data[0]["id"]
-
-    document = client.table("documents").select("id").eq("id", document_id).eq("user_id", user_id).execute()
-    if not document.data:
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
         return False
 
-    client.table("documents").delete().eq("id", document_id).execute()
-    return True
+    with cursor() as cur:
+        cur.execute(
+            "DELETE FROM documents WHERE id = %s AND user_id = %s RETURNING id",
+            (document_id, user_id),
+        )
+        return cur.fetchone() is not None
 
 
 # --- Tutor session persistence (ROADMAP 1.1) ---------------------------------
@@ -540,49 +632,75 @@ _TUTOR_STATE_FIELDS = (
     "questions_answered", "correct_answers",
 )
 
+# Which of the above are jsonb columns. psycopg needs dicts and lists wrapped
+# in Jsonb() to adapt them as jsonb rather than failing on an unknown type;
+# the remaining three (checkpoint_shown, questions_answered, correct_answers)
+# are a bool and two ints and must NOT be wrapped.
+_TUTOR_JSONB_FIELDS = frozenset({
+    "concepts", "asked_questions", "current", "history",
+    "verify_queue", "recheck_queue",
+})
+
+
+def _tutor_state_param(field: str, value):
+    """Adapt one _TUTOR_STATE_FIELDS value for psycopg."""
+    if field in _TUTOR_JSONB_FIELDS:
+        # `current` is nullable; Jsonb(None) would write a jsonb 'null' rather
+        # than a SQL NULL, and get_tutor_session distinguishes them.
+        return None if value is None else Jsonb(value)
+    return value
+
 
 def create_tutor_session(external_id: str, session: Dict) -> str:
     """Insert a new active tutor session and return its DB-generated id,
     which becomes the public session_id."""
-    client = _get_client()
     user_id = get_or_create_user(external_id)
 
-    row = {
-        "user_id": user_id,
-        "subject": session["subject"],
-        "text_content": session["text_content"],
-        # The session's material, one entry per document (ROADMAP_LEARNING 3).
-        # Immutable for the session's life, like text_content — so it lives
-        # here rather than in _TUTOR_STATE_FIELDS.
-        "sources": session["sources"],
-        "mode": session["mode"],
-        **{field: session[field] for field in _TUTOR_STATE_FIELDS},
-    }
-    result = client.table("tutor_sessions").insert(row).execute()
-    return result.data[0]["id"]
+    # Column list is built from the same module-level constant that drives the
+    # SELECT and UPDATE below, so the three can never drift apart. The only
+    # non-parameterized interpolation in this file: every element of
+    # _TUTOR_STATE_FIELDS is a hard-coded literal, never user input.
+    state_cols = ", ".join(_TUTOR_STATE_FIELDS)
+    placeholders = ", ".join(["%s"] * len(_TUTOR_STATE_FIELDS))
+
+    with cursor() as cur:
+        cur.execute(
+            f"INSERT INTO tutor_sessions"
+            f" (user_id, subject, text_content, sources, mode, {state_cols})"
+            f" VALUES (%s, %s, %s, %s, %s, {placeholders}) RETURNING id",
+            (
+                user_id,
+                session["subject"],
+                session["text_content"],
+                # The session's material, one entry per document
+                # (ROADMAP_LEARNING 3). Immutable for the session's life, like
+                # text_content — so it is not in _TUTOR_STATE_FIELDS.
+                Jsonb(session["sources"]) if session["sources"] is not None else None,
+                session["mode"],
+                *[_tutor_state_param(f, session[f]) for f in _TUTOR_STATE_FIELDS],
+            ),
+        )
+        return str(cur.fetchone()["id"])
 
 
 def get_tutor_session(session_id: str, external_id: str) -> Optional[Dict]:
     """Load an active tutor session, scoped to the requesting user. Returns
     the session state dict in tutor_agent's in-memory shape, or None."""
-    client = _get_client()
-
-    user = client.table("users").select("id").eq("external_id", external_id).execute()
-    if not user.data:
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
         return None
 
-    rows = (
-        client.table("tutor_sessions")
-        .select("subject, text_content, sources, mode, " + ", ".join(_TUTOR_STATE_FIELDS))
-        .eq("id", session_id)
-        .eq("user_id", user.data[0]["id"])
-        .eq("status", "active")
-        .execute()
-        .data
-    )
-    if not rows:
+    state_cols = ", ".join(_TUTOR_STATE_FIELDS)
+    with cursor() as cur:
+        cur.execute(
+            f"SELECT subject, text_content, sources, mode, {state_cols}"
+            f" FROM tutor_sessions"
+            f" WHERE id = %s AND user_id = %s AND status = 'active'",
+            (session_id, user_id),
+        )
+        row = cur.fetchone()
+    if not row:
         return None
-    row = rows[0]
 
     return {
         "user_id": external_id,
@@ -603,43 +721,79 @@ def get_tutor_session(session_id: str, external_id: str) -> Optional[Dict]:
 
 def save_tutor_session(session_id: str, session: Dict) -> None:
     """Write the mutable session state back after an answer/new question."""
-    client = _get_client()
-    update = {field: session[field] for field in _TUTOR_STATE_FIELDS}
-    update["updated_at"] = datetime.now(timezone.utc).isoformat()
-    client.table("tutor_sessions").update(update).eq("id", session_id).execute()
+    assignments = ", ".join(f"{field} = %s" for field in _TUTOR_STATE_FIELDS)
+    with cursor() as cur:
+        cur.execute(
+            f"UPDATE tutor_sessions SET {assignments}, updated_at = now()"
+            f" WHERE id = %s",
+            (
+                *[_tutor_state_param(f, session[f]) for f in _TUTOR_STATE_FIELDS],
+                session_id,
+            ),
+        )
 
 
 def complete_tutor_session(session_id: str, session: Dict) -> None:
     """Mark the session completed and record it as a quiz attempt (plus
     per-question rows from the session's answer history) so tutor runs show
     up in the recent-attempts sidebar, stats, and analytics."""
-    client = _get_client()
-
-    client.table("tutor_sessions").update({
-        "status": "completed",
-        **{field: session[field] for field in _TUTOR_STATE_FIELDS},
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", session_id).execute()
-
     total = session["questions_answered"]
-    if not total:
-        return
-    score = (session["correct_answers"] / total) * 100
+    # get_or_create_user opens its own connection, so resolve it before the
+    # transaction below rather than nesting a second pool checkout inside it.
+    user_id = get_or_create_user(session["user_id"]) if total else None
 
-    user_id = get_or_create_user(session["user_id"])
-    attempt = client.table("quiz_attempts").insert({
-        "user_id": user_id,
-        "subject_id": None,  # tutor sessions aren't tied to a subjects row
-        "subject": session["subject"],
-        "difficulty": "adaptive",
-        "total_questions": total,
-        "score": score,
-    }).execute()
-    attempt_id = attempt.data[0]["id"]
+    _complete_tutor_session_tx(session_id, session, total, user_id)
 
-    question_rows = [{**entry, "quiz_attempt_id": attempt_id} for entry in session["history"]]
-    if question_rows:
-        client.table("question_attempts").insert(question_rows).execute()
+
+@retry_on_serialization_failure
+def _complete_tutor_session_tx(session_id: str, session: Dict, total: int,
+                               user_id: Optional[str]) -> None:
+    """Mark completed and record the attempt, atomically.
+
+    Supabase issued up to three independent writes here. A failure partway
+    through could mark a session completed while its quiz attempt was never
+    recorded (the session disappears from the sidebar but never appears in
+    history), or record an attempt with no question rows. One transaction
+    makes the whole thing all-or-nothing.
+    """
+    assignments = ", ".join(f"{field} = %s" for field in _TUTOR_STATE_FIELDS)
+
+    with transaction() as cur:
+        cur.execute(
+            f"UPDATE tutor_sessions SET status = 'completed', {assignments},"
+            f" updated_at = now() WHERE id = %s",
+            (
+                *[_tutor_state_param(f, session[f]) for f in _TUTOR_STATE_FIELDS],
+                session_id,
+            ),
+        )
+
+        if not total:
+            return
+
+        score = (session["correct_answers"] / total) * 100
+        cur.execute(
+            "INSERT INTO quiz_attempts"
+            " (user_id, subject_id, subject, difficulty, total_questions, score)"
+            " VALUES (%s, NULL, %s, 'adaptive', %s, %s) RETURNING id",
+            (user_id, session["subject"], total, score),
+        )
+        attempt_id = str(cur.fetchone()["id"])
+
+        history = session["history"]
+        if history:
+            cur.executemany(
+                "INSERT INTO question_attempts"
+                " (quiz_attempt_id, question_text, category, difficulty,"
+                "  user_answer, correct_answer, is_correct, question_index)"
+                " VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                [
+                    (attempt_id, e["question_text"], e.get("category"),
+                     e.get("difficulty"), e["user_answer"], e["correct_answer"],
+                     e["is_correct"], e["question_index"])
+                    for e in history
+                ],
+            )
 
 
 # --- Spaced repetition for flashcards (ROADMAP 4.1) ---------------------------
@@ -697,50 +851,59 @@ def save_flashcard_set(
 ) -> Optional[str]:
     """Persist a freshly generated flashcard set with every card immediately
     due (first review seeds its schedule). Returns the set id."""
-    client = _get_client()
     user_id = get_or_create_user(external_id)
+    return _save_flashcard_set_tx(user_id, subject, card_type, cards, document_id)
 
-    set_row = client.table("flashcard_sets").insert({
-        "user_id": user_id,
-        "subject": subject,
-        "card_type": card_type,
-        "document_id": document_id,
-    }).execute()
-    set_id = set_row.data[0]["id"]
 
-    client.table("flashcards").insert([
-        {
-            "set_id": set_id,
-            "user_id": user_id,
-            "front": card["front"],
-            "back": card["back"],
-            "category": card.get("category"),
-        }
-        for card in cards
-    ]).execute()
-    return set_id
+@retry_on_serialization_failure
+def _save_flashcard_set_tx(user_id: str, subject: str, card_type: str,
+                           cards: List[Dict], document_id: Optional[str]) -> str:
+    """Set + cards in one transaction, so a failure can't leave an empty set."""
+    with transaction() as cur:
+        cur.execute(
+            "INSERT INTO flashcard_sets (user_id, subject, card_type, document_id)"
+            " VALUES (%s,%s,%s,%s) RETURNING id",
+            (user_id, subject, card_type, document_id),
+        )
+        set_id = str(cur.fetchone()["id"])
+
+        if cards:
+            cur.executemany(
+                "INSERT INTO flashcards (set_id, user_id, front, back, category)"
+                " VALUES (%s,%s,%s,%s,%s)",
+                [
+                    (set_id, user_id, c["front"], c["back"], c.get("category"))
+                    for c in cards
+                ],
+            )
+        return set_id
 
 
 def get_due_flashcards(external_id: str, limit: int = 100) -> Dict:
     """Cards due for review now (most overdue first) plus the total due
     count, for the review screen and the due-count badge."""
-    client = _get_client()
-
-    user = client.table("users").select("id").eq("external_id", external_id).execute()
-    if not user.data:
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
         return {"cards": [], "total_due": 0}
-    user_id = user.data[0]["id"]
 
-    now = datetime.now(timezone.utc).isoformat()
-    result = (
-        client.table("flashcards")
-        .select("id, front, back, category, due_at, repetitions, flashcard_sets(subject)", count="exact")
-        .eq("user_id", user_id)
-        .lte("due_at", now)
-        .order("due_at")
-        .limit(limit)
-        .execute()
-    )
+    with cursor() as cur:
+        # Supabase's embedded `flashcard_sets(subject)` becomes a JOIN, and its
+        # count="exact" (the pre-LIMIT total, for the due badge) becomes a
+        # window count — computed over the full matching set before LIMIT
+        # applies, so one query still yields both the page and the true total.
+        cur.execute(
+            "SELECT f.id, f.front, f.back, f.category, f.due_at, f.repetitions,"
+            " fs.subject, count(*) OVER () AS total_due"
+            " FROM flashcards f"
+            " JOIN flashcard_sets fs ON fs.id = f.set_id"
+            " WHERE f.user_id = %s AND f.due_at <= now()"
+            # f.id breaks ties: a freshly generated set has every card due at
+            # the same instant, so due_at alone leaves the order undefined and
+            # the review screen would shuffle between loads.
+            " ORDER BY f.due_at, f.id LIMIT %s",
+            (user_id, limit),
+        )
+        rows = _rows(cur.fetchall())
 
     cards = [
         {
@@ -748,46 +911,51 @@ def get_due_flashcards(external_id: str, limit: int = 100) -> Dict:
             "front": row["front"],
             "back": row["back"],
             "category": row.get("category"),
-            "subject": (row.get("flashcard_sets") or {}).get("subject", ""),
+            # JOIN (not LEFT JOIN): set_id is NOT NULL with an FK, so a card
+            # without a set cannot exist. Kept as "" default for shape parity.
+            "subject": row.get("subject") or "",
             "due_at": row["due_at"],
             "repetitions": row["repetitions"],
         }
-        for row in result.data
+        for row in rows
     ]
-    return {"cards": cards, "total_due": result.count if result.count is not None else len(cards)}
+    total_due = rows[0]["total_due"] if rows else 0
+    return {"cards": cards, "total_due": total_due}
 
 
 def review_flashcard(card_id: str, external_id: str, grade: str) -> Optional[Dict]:
     """Apply one self-graded review to a card and return its new schedule.
     Ownership-scoped; returns None for foreign/unknown cards."""
-    client = _get_client()
-
-    user = client.table("users").select("id").eq("external_id", external_id).execute()
-    if not user.data:
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
         return None
-    user_id = user.data[0]["id"]
 
-    card = (
-        client.table("flashcards")
-        .select("id, interval_days, ease, repetitions")
-        .eq("id", card_id)
-        .eq("user_id", user_id)
-        .execute()
-        .data
-    )
-    if not card:
-        return None
-    card = card[0]
+    with cursor() as cur:
+        cur.execute(
+            "SELECT id, interval_days, ease, repetitions FROM flashcards"
+            " WHERE id = %s AND user_id = %s",
+            (card_id, user_id),
+        )
+        card = cur.fetchone()
+        if not card:
+            return None
 
-    schedule = _schedule_review(card["interval_days"], card["ease"], card["repetitions"], grade)
-    now = datetime.now(timezone.utc)
-    due_at = now + schedule.pop("due_in")
+        schedule = _schedule_review(
+            card["interval_days"], card["ease"], card["repetitions"], grade
+        )
+        now = datetime.now(timezone.utc)
+        due_at = now + schedule.pop("due_in")
 
-    client.table("flashcards").update({
-        **schedule,
-        "due_at": due_at.isoformat(),
-        "last_reviewed_at": now.isoformat(),
-    }).eq("id", card_id).execute()
+        # user_id repeated in the UPDATE predicate: the SELECT above already
+        # proved ownership, but keeping it here means no window between the
+        # check and the write.
+        cur.execute(
+            "UPDATE flashcards SET interval_days = %s, ease = %s, repetitions = %s,"
+            " due_at = %s, last_reviewed_at = %s"
+            " WHERE id = %s AND user_id = %s",
+            (schedule["interval_days"], schedule["ease"], schedule["repetitions"],
+             due_at, now, card_id, user_id),
+        )
 
     return {**schedule, "due_at": due_at.isoformat()}
 
@@ -808,19 +976,16 @@ CONCEPT_MATCH_THRESHOLD = 0.85
 def match_concept_mastery(external_id: str, embedding: List[float]) -> Optional[Dict]:
     """Nearest stored concept-mastery row for this user above the match
     threshold, or None. Returns id, concept, mastery, and lifetime counters."""
-    client = _get_client()
-
-    user = client.table("users").select("id").eq("external_id", external_id).execute()
-    if not user.data:
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
         return None
 
-    rows = client.rpc("match_concept_mastery", {
-        "query_embedding": embedding,
-        "target_user_id": user.data[0]["id"],
-        "match_threshold": CONCEPT_MATCH_THRESHOLD,
-        "match_count": 1,
-    }).execute().data or []
-    return rows[0] if rows else None
+    with cursor() as cur:
+        cur.execute(
+            "SELECT * FROM match_concept_mastery(%s, %s, %s, %s)",
+            (to_vector(embedding), user_id, CONCEPT_MATCH_THRESHOLD, 1),
+        )
+        return _row(cur.fetchone())
 
 
 def create_concept_mastery(
@@ -828,17 +993,17 @@ def create_concept_mastery(
     document_id: Optional[str] = None, subject: Optional[str] = None,
 ) -> str:
     """First sighting of a concept for this user — insert and return the row id."""
-    client = _get_client()
     user_id = get_or_create_user(external_id)
-    created = client.table("concept_mastery").insert({
-        "user_id": user_id,
-        "concept": concept,
-        "embedding": embedding,
-        "mastery": mastery,
-        "document_id": document_id,
-        "subject": subject,
-    }).execute()
-    return created.data[0]["id"]
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO concept_mastery"
+            " (user_id, concept, embedding, mastery, document_id, subject)"
+            " VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+            # to_vector() is required — pgvector's input adapter does not bind
+            # on CockroachDB, so a bare list would fail as a malformed literal.
+            (user_id, concept, to_vector(embedding), mastery, document_id, subject),
+        )
+        return str(cur.fetchone()["id"])
 
 
 def set_concept_source(row_id: str, document_id: Optional[str], subject: Optional[str]) -> None:
@@ -851,19 +1016,25 @@ def set_concept_source(row_id: str, document_id: Optional[str], subject: Optiona
         updates["subject"] = subject
     if not updates:
         return
-    client = _get_client()
-    client.table("concept_mastery").update(updates).eq("id", row_id).execute()
+
+    # Column names come from this function's own literals, never from input;
+    # the values stay parameterized.
+    assignments = ", ".join(f"{col} = %s" for col in updates)
+    with cursor() as cur:
+        cur.execute(
+            f"UPDATE concept_mastery SET {assignments} WHERE id = %s",
+            (*updates.values(), row_id),
+        )
 
 
 def update_concept_mastery(row_id: str, mastery: float, questions_asked: int, questions_correct: int) -> None:
     """Write the current mastery estimate and lifetime counters back."""
-    client = _get_client()
-    client.table("concept_mastery").update({
-        "mastery": mastery,
-        "questions_asked": questions_asked,
-        "questions_correct": questions_correct,
-        "last_seen_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", row_id).execute()
+    with cursor() as cur:
+        cur.execute(
+            "UPDATE concept_mastery SET mastery = %s, questions_asked = %s,"
+            " questions_correct = %s, last_seen_at = now() WHERE id = %s",
+            (mastery, questions_asked, questions_correct, row_id),
+        )
 
 
 def update_concept_calibration(
@@ -872,13 +1043,12 @@ def update_concept_calibration(
     """Lifetime (confidence, correctness) counters (ROADMAP_LEARNING 5).
     Kept separate from update_concept_mastery so a not-yet-migrated
     concept_mastery table can't block the mastery write."""
-    client = _get_client()
-    client.table("concept_mastery").update({
-        "conf_high_asked": high_answered,
-        "conf_high_correct": high_correct,
-        "conf_low_asked": low_answered,
-        "conf_low_correct": low_correct,
-    }).eq("id", row_id).execute()
+    with cursor() as cur:
+        cur.execute(
+            "UPDATE concept_mastery SET conf_high_asked = %s, conf_high_correct = %s,"
+            " conf_low_asked = %s, conf_low_correct = %s WHERE id = %s",
+            (high_answered, high_correct, low_answered, low_correct, row_id),
+        )
 
 
 # --- Spaced repetition for concepts (ROADMAP_LEARNING 6) ----------------------
@@ -895,17 +1065,14 @@ CONCEPT_RELEARN_DAYS = 1.0
 
 def schedule_concept_review(row_id: str, confirmed: bool) -> None:
     """Reschedule one concept's next review after a finished session."""
-    client = _get_client()
-    rows = (
-        client.table("concept_mastery")
-        .select("review_interval_days, review_count")
-        .eq("id", row_id)
-        .execute()
-        .data
-    )
-    if not rows:
+    with cursor() as cur:
+        cur.execute(
+            "SELECT review_interval_days, review_count FROM concept_mastery WHERE id = %s",
+            (row_id,),
+        )
+        row = cur.fetchone()
+    if not row:
         return
-    row = rows[0]
 
     if confirmed:
         if row["review_count"] == 0 or row["review_interval_days"] <= 0:
@@ -918,11 +1085,12 @@ def schedule_concept_review(row_id: str, confirmed: bool) -> None:
         review_count = 0
 
     due_at = datetime.now(timezone.utc) + timedelta(days=interval)
-    client.table("concept_mastery").update({
-        "review_interval_days": interval,
-        "review_count": review_count,
-        "review_due_at": due_at.isoformat(),
-    }).eq("id", row_id).execute()
+    with cursor() as cur:
+        cur.execute(
+            "UPDATE concept_mastery SET review_interval_days = %s, review_count = %s,"
+            " review_due_at = %s WHERE id = %s",
+            (interval, review_count, due_at, row_id),
+        )
 
 
 def get_due_concept_reviews(external_id: str, limit: int = 3) -> Dict:
@@ -930,59 +1098,62 @@ def get_due_concept_reviews(external_id: str, limit: int = 3) -> Dict:
     with their source document so one click can start a refresher. Concepts
     whose source document was deleted are skipped — there is no stored
     content to refresh from."""
-    client = _get_client()
-
-    user = client.table("users").select("id").eq("external_id", external_id).execute()
-    if not user.data:
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
         return {"concepts": [], "total_due": 0}
-    user_id = user.data[0]["id"]
 
     now = datetime.now(timezone.utc)
-    result = (
-        client.table("concept_mastery")
-        .select("id, concept, mastery, subject, document_id, last_seen_at, review_due_at, documents(filename)", count="exact")
-        .eq("user_id", user_id)
-        .lte("review_due_at", now.isoformat())
-        .not_.is_("document_id", "null")
-        .order("review_due_at")
-        .limit(limit)
-        .execute()
-    )
+    with cursor() as cur:
+        # The inner JOIN enforces what Supabase expressed as
+        # .not_.is_("document_id", "null") *plus* the docstring's intent:
+        # concepts whose source document was deleted are skipped, because
+        # there is no stored content to refresh from. A LEFT JOIN would
+        # resurrect those rows with a null filename.
+        cur.execute(
+            "SELECT cm.id, cm.concept, cm.mastery, cm.subject, cm.document_id,"
+            " cm.last_seen_at, cm.review_due_at, d.filename AS document_filename,"
+            " count(*) OVER () AS total_due"
+            " FROM concept_mastery cm"
+            " JOIN documents d ON d.id = cm.document_id"
+            " WHERE cm.user_id = %s AND cm.review_due_at <= %s"
+            " ORDER BY cm.review_due_at LIMIT %s",
+            (user_id, now, limit),
+        )
+        rows = cur.fetchall()
 
     concepts = []
-    for row in result.data:
+    for row in rows:
+        # last_seen_at arrives as a datetime from psycopg, where supabase-py
+        # returned an ISO string — the original code called .replace("Z", …)
+        # on it and would raise AttributeError here. Subtract directly.
         last_seen = row.get("last_seen_at")
-        days_since = None
-        if last_seen:
-            try:
-                seen_dt = datetime.fromisoformat(last_seen.replace("Z", "+00:00"))
-                days_since = max(0, (now - seen_dt).days)
-            except ValueError:
-                pass
+        days_since = max(0, (now - last_seen).days) if last_seen else None
         concepts.append({
-            "id": row["id"],
+            "id": str(row["id"]),
             "concept": row["concept"],
             "mastery": row["mastery"],
             "subject": row.get("subject"),
-            "document_id": row["document_id"],
-            "document_filename": (row.get("documents") or {}).get("filename"),
-            "last_seen_at": last_seen,
-            "review_due_at": row["review_due_at"],
+            "document_id": str(row["document_id"]) if row["document_id"] else None,
+            "document_filename": row.get("document_filename"),
+            "last_seen_at": last_seen.isoformat().replace("+00:00", "Z") if last_seen else None,
+            "review_due_at": row["review_due_at"].isoformat().replace("+00:00", "Z")
+            if row["review_due_at"] else None,
             "days_since_seen": days_since,
         })
-    return {"concepts": concepts, "total_due": result.count if result.count is not None else len(concepts)}
+    total_due = rows[0]["total_due"] if rows else 0
+    return {"concepts": concepts, "total_due": total_due}
 
 
 def record_misconception(external_id: str, concept_mastery_id: str, concept: str, misconception: str) -> None:
     """Persist one diagnosed misconception, linked to the concept's mastery row."""
-    client = _get_client()
     user_id = get_or_create_user(external_id)
-    client.table("misconceptions").insert({
-        "user_id": user_id,
-        "concept_mastery_id": concept_mastery_id,
-        "concept": concept,
-        "misconception": misconception,
-    }).execute()
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO misconceptions"
+            " (user_id, concept_mastery_id, concept, misconception)"
+            " VALUES (%s,%s,%s,%s)",
+            (user_id, concept_mastery_id, concept, misconception),
+        )
 
 
 def get_recent_misconceptions(concept_mastery_id: str, limit: int = 3) -> List[str]:
@@ -995,16 +1166,14 @@ def get_recent_misconception_rows(concept_mastery_id: str, limit: int = 3) -> Li
     {id, misconception} rows. Teach-it-back (ROADMAP_LEARNING 4) needs the id:
     a misconception the student successfully corrects gets cleared, and you
     can't delete a row you only know the text of."""
-    client = _get_client()
-    return (
-        client.table("misconceptions")
-        .select("id, misconception")
-        .eq("concept_mastery_id", concept_mastery_id)
-        .order("created_at", desc=True)
-        .limit(limit)
-        .execute()
-        .data
-    )
+    with cursor() as cur:
+        cur.execute(
+            "SELECT id, misconception FROM misconceptions"
+            " WHERE concept_mastery_id = %s"
+            " ORDER BY created_at DESC LIMIT %s",
+            (concept_mastery_id, limit),
+        )
+        return _rows(cur.fetchall())
 
 
 def clear_misconception(misconception_id: str) -> None:
@@ -1012,5 +1181,5 @@ def clear_misconception(misconception_id: str) -> None:
     (ROADMAP_LEARNING 4). Deleted rather than flagged: the row exists to seed
     future probing, and a corrected misconception should stop being probed —
     the mastery estimate is what carries the long-term record."""
-    client = _get_client()
-    client.table("misconceptions").delete().eq("id", misconception_id).execute()
+    with cursor() as cur:
+        cur.execute("DELETE FROM misconceptions WHERE id = %s", (misconception_id,))
