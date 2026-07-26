@@ -11,7 +11,7 @@ TITLE_PAGE_WORD_THRESHOLD = 15
 # paying for a vision call to describe it.
 VISUAL_CONTENT_THRESHOLD = 1
 
-MAX_ASSEMBLED_CHARS = 15000
+MAX_ASSEMBLED_CHARS = 120000
 
 
 def _classify_page(page: fitz.Page, text: str) -> str:

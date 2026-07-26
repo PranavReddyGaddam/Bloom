@@ -279,6 +279,48 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     }
   }, [pollProgress, rememberAttachments])
 
+  // Attach a link (YouTube video, article, direct media). Deliberately the
+  // same shape as handleAttachFile: ingestion produces a document, and from
+  // there nothing downstream knows or cares that it came from a URL.
+  const handleAttachUrl = useCallback(async (url: string) => {
+    const trimmed = url.trim()
+    if (!trimmed) return
+
+    setError('')
+    setLoading(true)
+
+    const progressId = crypto.randomUUID()
+    const stopPolling = pollProgress(progressId)
+    try {
+      const result = await api.ingestUrl(trimmed, progressId)
+      if (!result.document_id) {
+        throw new Error('That link was processed but could not be saved')
+      }
+      const attachment: Attachment = {
+        documentId: result.document_id,
+        filename: result.filename,
+        textContent: result.text_content,
+      }
+      setAttachments(prev => {
+        const next = [...prev.filter(a => a.documentId !== attachment.documentId), attachment]
+        rememberAttachments(next)
+        return next
+      })
+      setSimilarDocuments(result.similar_documents ?? [])
+      // A long lecture exceeds the extraction budget; say so plainly rather
+      // than letting the student study a silently shortened transcript.
+      if (result.truncated) {
+        setError(
+          `"${result.filename}" was long, so only the first part was kept. ` +
+          `Study material is generated from that portion.`
+        )
+      }
+    } finally {
+      stopPolling()
+      setLoading(false)
+    }
+  }, [pollProgress, rememberAttachments])
+
   // Attach an existing library document — the same action as uploading, minus
   // the upload, so it lands in exactly the same place.
   const handleAttachDocument = useCallback(async (docId: string) => {
@@ -562,6 +604,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
         setFormData={setFormData}
         attachments={attachments}
         onAttachFile={handleAttachFile}
+        onAttachUrl={handleAttachUrl}
         onAttachDocument={handleAttachDocument}
         onRemoveAttachment={handleRemoveAttachment}
         onStart={handleStart}

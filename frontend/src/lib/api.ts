@@ -78,6 +78,34 @@ export const api = {
     return response.json();
   },
 
+  // Ingest a YouTube video, direct media link, or article URL. Returns the
+  // same shape as uploadPDF so callers reuse one path — a link becomes a
+  // document like any other.
+  async ingestUrl(url: string, progressId?: string): Promise<PDFUploadResponse> {
+    const response = await fetch(`${API_BASE_URL}/ingest-url`, {
+      method: 'POST',
+      headers: {
+        ...(await authHeaders()),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ url, progress_id: progressId }),
+    });
+
+    if (!response.ok) {
+      // 422 carries a message written for the student ("no captions", "page
+      // is behind a login"); surface it rather than a generic failure.
+      let detail = '';
+      try {
+        detail = (await response.json())?.detail ?? '';
+      } catch {
+        detail = '';
+      }
+      throw new APIError(detail || 'Failed to ingest that link', response.status);
+    }
+
+    return response.json();
+  },
+
   async generateSummary(
     textContent: string,
     summaryType: SummaryType,

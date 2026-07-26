@@ -15,6 +15,7 @@ interface UploadStepProps {
   setFormData: React.Dispatch<React.SetStateAction<StudyFormData>>
   attachments: Attachment[]
   onAttachFile: (file: File) => Promise<void>
+  onAttachUrl: (url: string) => Promise<void>
   onAttachDocument: (documentId: string) => Promise<void>
   onRemoveAttachment: (documentId: string) => void
   onStart: () => void
@@ -34,6 +35,7 @@ export function UploadStep({
   setFormData,
   attachments,
   onAttachFile,
+  onAttachUrl,
   onAttachDocument,
   onRemoveAttachment,
   onStart,
@@ -96,6 +98,7 @@ export function UploadStep({
           setFormData={setFormData}
           attachments={attachments}
           onAttachFile={onAttachFile}
+          onAttachUrl={onAttachUrl}
           onRemoveAttachment={onRemoveAttachment}
           onStart={onStart}
           loading={loading}

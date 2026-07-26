@@ -1,6 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+import asyncio
 import os
 import json
 import tempfile
@@ -13,6 +14,7 @@ from dotenv import load_dotenv
 from .ai_service import BloomAI
 from .models import SummaryRequest, QuizRequest, QuizResponse, SummaryResponse, FlashcardRequest, FlashcardResponse, AnswerCheckRequest, AnswerCheckResponse, AttemptBreakdownResponse, UserStatsResponse, UserAnalyticsResponse, AttemptRecapResponse, RecentAttempt, Subject, CreateSubjectRequest, TutorStartRequest, TutorStartResponse, TutorAnswerRequest, TutorAnswerResponse, TutorWrapRequest, TutorWrapResponse, DocumentInfo, DocumentContent, DueFlashcard, DueFlashcardsResponse, FlashcardReviewRequest, FlashcardReviewResponse, PretestStartRequest, PretestStartResponse, PretestSubmitRequest, PretestSubmitResponse, DueConceptReviewsResponse
 from . import extraction_agent
+from . import url_ingest
 from . import tutor_agent
 from . import pretest_agent
 from . import memory_service
@@ -92,10 +94,13 @@ async def upload_pdf(
             )
         elif ext == ".docx":
             progress.report(progress_id, "Extracting text")
-            text_content = extract_text_from_docx(file_path)
+            # Both are sync and CPU-bound; a large deck would otherwise stall
+            # every concurrent request, including the /progress polls that
+            # exist to keep the UI responsive.
+            text_content = await asyncio.to_thread(extract_text_from_docx, file_path)
         else:
             progress.report(progress_id, "Extracting text")
-            text_content = extract_text_from_pptx(file_path)
+            text_content = await asyncio.to_thread(extract_text_from_pptx, file_path)
 
         # Memory layer: store this upload in the user's vector memory and
         # surface prior uploads with substantial overlap. Best-effort — a
@@ -127,6 +132,55 @@ async def upload_pdf(
                 os.remove(file_path)
             except OSError:
                 pass
+
+class IngestUrlRequest(BaseModel):
+    url: str
+    progress_id: Optional[str] = None
+
+
+@app.post("/ingest-url")
+async def ingest_url(
+    request: IngestUrlRequest,
+    user_id: str = Depends(auth.get_current_user_id),
+):
+    """Ingest a YouTube video, direct media link, or article URL.
+
+    Returns the same shape as /upload-pdf so the frontend reuses one path:
+    a link becomes a document like any other, studiable identically.
+    """
+    progress_id = request.progress_id
+    try:
+        result = await url_ingest.ingest_url(
+            request.url, ai_service, progress=progress.reporter(progress_id)
+        )
+
+        progress.report(progress_id, "Comparing against your past uploads")
+        similar_documents = []
+        document_id = None
+        try:
+            similar_documents, document_id = await memory_service.remember_upload(
+                user_id, result.filename, result.text
+            )
+        except Exception:
+            pass
+
+        return {
+            "filename": result.filename,
+            "text_content": result.text,
+            "word_count": len(result.text.split()),
+            "similar_documents": similar_documents,
+            "document_id": document_id,
+            "truncated": result.truncated,
+        }
+
+    except url_ingest.IngestError as e:
+        # These messages are written for the user and say what to try next.
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error ingesting URL: {str(e)}")
+    finally:
+        progress.clear(progress_id)
+
 
 async def _weak_concepts_if_overlap(has_overlap: bool, user_id: str, text_content: str) -> Optional[List[str]]:
     """ROADMAP 3.2: when the upload overlapped prior material, fetch the

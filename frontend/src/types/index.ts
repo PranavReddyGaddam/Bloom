@@ -128,6 +128,10 @@ export interface PDFUploadResponse {
   // Id of this upload in the documents library (memory layer); null if
   // storing failed (best-effort).
   document_id?: string | null;
+  // Set by /ingest-url when the source exceeded the extraction budget and
+  // its tail was dropped. Long lecture transcripts routinely hit this, so
+  // the UI has to say so rather than silently studying two-thirds of a video.
+  truncated?: boolean;
 }
 
 // Documents library (stored uploads, re-studiable without re-uploading)

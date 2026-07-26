@@ -2,8 +2,8 @@
 
 import { useRef, useState } from 'react'
 import {
-  ArrowUp, BookOpen, ChevronDown, ClipboardList, FileText, GraduationCap, Loader2,
-  Paperclip, PencilLine, Sliders, Target, X,
+  ArrowUp, BookOpen, ChevronDown, ClipboardList, FileText, GraduationCap, Link as LinkIcon,
+  Loader2, Paperclip, PencilLine, Sliders, Target, X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
@@ -50,6 +50,7 @@ interface StudyBarProps {
   setFormData: React.Dispatch<React.SetStateAction<StudyFormData>>
   attachments: Attachment[]
   onAttachFile: (file: File) => Promise<void>
+  onAttachUrl: (url: string) => Promise<void>
   onRemoveAttachment: (documentId: string) => void
   onStart: () => void
   loading: boolean
@@ -68,6 +69,7 @@ export function StudyBar({
   setFormData,
   attachments,
   onAttachFile,
+  onAttachUrl,
   onRemoveAttachment,
   onStart,
   loading,
@@ -79,6 +81,8 @@ export function StudyBar({
   const [attachError, setAttachError] = useState('')
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [dragging, setDragging] = useState(false)
+  const [urlOpen, setUrlOpen] = useState(false)
+  const [urlValue, setUrlValue] = useState('')
 
   const selected = (output: StudyOutput) => formData.outputs.includes(output)
 
@@ -95,6 +99,25 @@ export function StudyBar({
       }
     } catch (err) {
       setAttachError(err instanceof Error ? err.message : 'Failed to add that file')
+    } finally {
+      setAttaching(false)
+    }
+  }
+
+  // A link takes the same route as a file: ingest, then it's an attachment.
+  // Video transcription can run for minutes, so this leans on the same
+  // progress reporting the upload path uses rather than a bare spinner.
+  const submitUrl = async () => {
+    const url = urlValue.trim()
+    if (!url) return
+    setAttaching(true)
+    setAttachError('')
+    try {
+      await onAttachUrl(url)
+      setUrlValue('')
+      setUrlOpen(false)
+    } catch (err) {
+      setAttachError(err instanceof Error ? err.message : 'Failed to add that link')
     } finally {
       setAttaching(false)
     }
@@ -176,6 +199,31 @@ export function StudyBar({
           </div>
         )}
 
+        {urlOpen && (
+          <div className="flex items-center gap-2 px-3 pt-3">
+            <input
+              type="url"
+              value={urlValue}
+              onChange={(e) => setUrlValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { e.preventDefault(); submitUrl() }
+                if (e.key === 'Escape') { setUrlOpen(false); setUrlValue('') }
+              }}
+              disabled={loading || attaching}
+              autoFocus
+              placeholder="Paste a YouTube video or article link…"
+              className="flex-1 rounded-lg border border-white/15 bg-white/[0.06] px-3 py-2 text-sm text-white placeholder:text-white/35 outline-none focus:border-[#D7FF3D]/40 disabled:opacity-50"
+            />
+            <Button
+              onClick={submitUrl}
+              disabled={loading || attaching || !urlValue.trim()}
+              className={`${LIME_BG} text-black hover:bg-[#c2e836] shrink-0`}
+            >
+              {attaching ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Add'}
+            </Button>
+          </div>
+        )}
+
         <textarea
           value={formData.focusNote}
           onChange={(e) => setFormData(prev => ({ ...prev, focusNote: e.target.value }))}
@@ -213,6 +261,20 @@ export function StudyBar({
               className="hidden"
               disabled={loading || attaching}
             />
+
+            <button
+              type="button"
+              onClick={() => setUrlOpen(o => !o)}
+              disabled={loading || attaching}
+              aria-expanded={urlOpen}
+              aria-label="Add a link"
+              title="Add a YouTube video or article link"
+              className={`p-2 rounded-lg transition-colors disabled:opacity-50 ${
+                urlOpen ? 'text-white bg-white/10' : 'text-white/50 hover:text-white hover:bg-white/10'
+              }`}
+            >
+              <LinkIcon className="h-[18px] w-[18px]" />
+            </button>
 
             <button
               type="button"

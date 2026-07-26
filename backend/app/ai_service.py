@@ -71,14 +71,21 @@ class BloomAI:
     async def describe_page_image(self, image_bytes: bytes) -> str:
         """Describe a page image (diagram/chart/equation) using a vision-capable model.
 
-        Not pinned to Cerebras: Cerebras does not serve vision models, and the
-        main text model (gpt-oss-120b) is text-only. Uses a separate free
-        vision model instead.
+        Uses a separate model because the main text model (gpt-oss-120b) is
+        text-only.
+
+        Deliberately not provider-pinned. Extraction fans out one call per
+        visual page — 38 at once for a lecture deck — and a single provider
+        rate-limits that burst: pinning this to Cerebras 429'd 23 of 38 pages,
+        each silently degrading to that page's raw text. Letting OpenRouter
+        spread the burst across providers is what makes the fan-out survivable.
+        The text model stays pinned; its calls are sequential, so they never
+        burst.
         """
         encoded = base64.b64encode(image_bytes).decode("utf-8")
 
         data = {
-            "model": "google/gemma-4-31b-it:free",
+            "model": "google/gemma-4-31b-it",
             "messages": [
                 {
                     "role": "user",
@@ -265,7 +272,7 @@ if it is not covered at all, ignore it and proceed normally.
                 progress(stage)
 
         # Truncate content if too long (approximate token limit)
-        text_content = self._truncate(text_content, 15000)
+        text_content = self._truncate(text_content, 100000)
 
         subject_context = f" in the field of {subject}" if subject else ""
         emphasis = self._weak_concepts_block(weak_concepts) + self._focus_note_block(focus_note)
@@ -516,7 +523,7 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
                 progress(stage)
 
         # Truncate content if too long, leaving room for the prompt
-        text_content = self._truncate(text_content, 12000)
+        text_content = self._truncate(text_content, 80000)
 
         difficulty_instructions = {
             "easy": "Focus on basic concepts, definitions, and straightforward facts. Avoid complex reasoning.",
@@ -617,7 +624,7 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
         the quiz pipeline's policy. Returns None if generation failed or
         returned unparseable JSON.
         """
-        text_content = self._truncate(text_content, 12000)
+        text_content = self._truncate(text_content, 80000)
 
         difficulty_instructions = {
             "easy": "Test basic recall: a definition or straightforward fact.",
@@ -735,7 +742,7 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
         halves the grader requires), or None if generation failed or returned
         unparseable JSON.
         """
-        text_content = self._truncate(text_content, 12000)
+        text_content = self._truncate(text_content, 80000)
 
         avoid_block = ""
         if asked_questions:
@@ -808,7 +815,7 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
         JSON — callers fail open (treat as correct), matching the
         pipeline-wide policy that an API failure must never punish a student.
         """
-        text_content = self._truncate(text_content, 8000)
+        text_content = self._truncate(text_content, 60000)
 
         prompt = f"""A student is teaching a confused peer. The peer stated a misconception; the student's job
 is to correct it. Grade the correction on TWO separate parts, judging substance over wording (accept
@@ -871,7 +878,7 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
         correct) matching the pipeline-wide policy: an API failure must
         never punish the student.
         """
-        text_content = self._truncate(text_content, 8000)
+        text_content = self._truncate(text_content, 60000)
 
         prompt = f"""You are grading a student's short written answer against a model answer and the source text
 the question was based on. Judge the substance, not the wording: accept synonyms, paraphrase, and
@@ -916,7 +923,7 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
         callers should degrade to showing only the explanation (fail open,
         this is a quality layer).
         """
-        text_content = self._truncate(text_content, 8000)
+        text_content = self._truncate(text_content, 60000)
 
         prompt = f"""A student answered a quiz question incorrectly. Diagnose WHY they likely chose that answer —
 the specific misconception, mix-up, or knowledge gap it suggests — and what to review. Address the student
@@ -955,7 +962,7 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
         prompt = f"""Analyze the following text and extract 5-8 key topics or themes.
         Return only the topics as a comma-separated list.
         
-        Text: {self._truncate(text_content, 5000)}
+        Text: {self._truncate(text_content, 40000)}
         
         Topics:"""
         
@@ -982,7 +989,7 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
                 progress(stage)
 
         # Truncate content if too long
-        text_content = self._truncate(text_content, 12000)
+        text_content = self._truncate(text_content, 80000)
 
         card_type_instructions = {
             "definition": "Create cards with terms/concepts on the front and their definitions on the back.",
