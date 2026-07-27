@@ -4,7 +4,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { api } from '@/lib/api'
 import { DocumentInfo } from '@/types'
-import { Check, ChevronDown, FileText, Library, Trash2, Loader2, Plus } from 'lucide-react'
+import { Check, ChevronDown, Eye, FileText, Library, Trash2, Loader2, Plus } from 'lucide-react'
+import { DocumentViewer } from './DocumentViewer'
 
 const LIME = 'text-[#D7FF3D]'
 
@@ -32,6 +33,9 @@ export function DocumentLibrary({
   const [busyId, setBusyId] = useState<string | null>(null)
   const [open, setOpen] = useState(false)
   const [error, setError] = useState('')
+  // One open viewer at a time: each one fetches the whole PDF to render a
+  // page, so several expanded at once is a lot of pointless traffic.
+  const [viewingId, setViewingId] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -66,6 +70,8 @@ export function DocumentLibrary({
     try {
       await api.deleteDocument(documentId)
       setDocuments(prev => prev.filter(d => d.id !== documentId))
+      // Don't leave a viewer open on a row that no longer exists.
+      setViewingId(prev => (prev === documentId ? null : prev))
       // A deleted document can't stay attached — its text is gone server-side.
       onRemove(documentId)
     } catch {
@@ -123,12 +129,13 @@ export function DocumentLibrary({
           return (
             <li
               key={doc.id}
-              className={`flex items-center gap-3 rounded-xl border backdrop-blur-xl p-4 transition-colors ${
+              className={`rounded-xl border backdrop-blur-xl p-4 transition-colors ${
                 attached
                   ? 'border-[#D7FF3D]/40 bg-[#D7FF3D]/[0.06]'
                   : 'border-white/15 bg-white/[0.04]'
               }`}
             >
+            <div className="flex items-center gap-3">
               <FileText className={`h-5 w-5 shrink-0 ${LIME}`} />
               <div className="flex-1 min-w-0">
                 <p className="text-sm text-white truncate">{doc.filename}</p>
@@ -163,6 +170,23 @@ export function DocumentLibrary({
                 )}
               </Button>
 
+              {/* Only for uploads whose original file was kept — documents
+                  ingested from a URL never had one, and anything uploaded
+                  before originals were stored has nothing to show. */}
+              {doc.has_original && (
+                <button
+                  type="button"
+                  onClick={() => setViewingId(viewingId === doc.id ? null : doc.id)}
+                  aria-expanded={viewingId === doc.id}
+                  aria-label={`View ${doc.filename}`}
+                  className={`shrink-0 transition-colors ${
+                    viewingId === doc.id ? LIME : 'text-white/40 hover:text-white'
+                  }`}
+                >
+                  <Eye className="h-4 w-4" />
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => handleDelete(doc.id)}
@@ -172,6 +196,14 @@ export function DocumentLibrary({
               >
                 <Trash2 className="h-4 w-4" />
               </button>
+            </div>
+
+            {/* Mounted only while open, so a collapsed row fetches nothing. */}
+            {viewingId === doc.id && (
+              <div className="mt-3">
+                <DocumentViewer documentId={doc.id} filename={doc.filename} />
+              </div>
+            )}
             </li>
           )
         })}

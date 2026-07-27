@@ -546,6 +546,37 @@ def get_user_analytics(external_id: str) -> Dict:
 # these functions make that store user-visible: list, re-open, delete.
 
 
+PDF_CONTENT_TYPE = "application/pdf"
+
+
+def _source_flags(row: Dict) -> Dict:
+    """Derive the two booleans the client needs from the stored source columns.
+
+    The object key itself is deliberately not returned. The client never needs
+    it, and keeping it server-side upholds the same rule as presigned podcast
+    URLs: keys are internal, access is granted through ownership-checked
+    routes.
+    """
+    content_type = row.get("source_content_type")
+    return {
+        "has_original": bool(row.get("source_key")),
+        "is_pdf": content_type == PDF_CONTENT_TYPE,
+    }
+
+
+def attach_document_source(document_id: str, source_key: str, content_type: str) -> None:
+    """Record where an upload's original file was stored.
+
+    Not ownership-scoped: the caller just created this row and holds its id,
+    the same precedent attach_podcast_audio sets.
+    """
+    with cursor() as cur:
+        cur.execute(
+            "UPDATE documents SET source_key = %s, source_content_type = %s WHERE id = %s",
+            (source_key, content_type, document_id),
+        )
+
+
 def list_documents(external_id: str) -> List[Dict]:
     """All of a user's stored uploads, newest first, with chunk counts."""
     user_id = _lookup_user_id(external_id)
@@ -559,15 +590,23 @@ def list_documents(external_id: str) -> List[Dict]:
         # LEFT JOIN so a document with zero chunks still appears, matching the
         # counts.get(doc["id"], 0) default it replaces.
         cur.execute(
-            "SELECT d.id, d.filename, d.created_at, count(dc.id) AS chunk_count"
+            "SELECT d.id, d.filename, d.created_at, d.source_key, d.source_content_type,"
+            " count(dc.id) AS chunk_count"
             " FROM documents d"
             " LEFT JOIN document_chunks dc ON dc.document_id = d.id"
             " WHERE d.user_id = %s"
-            " GROUP BY d.id, d.filename, d.created_at"
+            " GROUP BY d.id, d.filename, d.created_at, d.source_key, d.source_content_type"
             " ORDER BY d.created_at DESC",
             (user_id,),
         )
-        return _rows(cur.fetchall())
+        rows = _rows(cur.fetchall())
+
+    # source_key is replaced by the derived flags rather than passed through.
+    for row in rows:
+        row.update(_source_flags(row))
+        row.pop("source_key", None)
+        row.pop("source_content_type", None)
+    return rows
 
 
 def get_document_content(document_id: str, external_id: str) -> Optional[Dict]:
@@ -580,7 +619,7 @@ def get_document_content(document_id: str, external_id: str) -> Optional[Dict]:
 
     with cursor() as cur:
         cur.execute(
-            "SELECT id, filename, created_at FROM documents"
+            "SELECT id, filename, created_at, source_key, source_content_type FROM documents"
             " WHERE id = %s AND user_id = %s",
             (document_id, user_id),
         )
@@ -603,7 +642,29 @@ def get_document_content(document_id: str, external_id: str) -> Optional[Dict]:
         "created_at": document["created_at"],
         "text_content": text_content,
         "word_count": len(text_content.split()),
+        **_source_flags(document),
     }
+
+
+def get_document_source(document_id: str, external_id: str) -> Optional[Dict]:
+    """An upload's stored-file pointer, for the routes that serve it.
+
+    Separate from get_document_content because that function reassembles every
+    chunk into one string — pointless work when the caller only wants an object
+    key. Ownership-scoped in the same query, so a foreign document is
+    indistinguishable from a nonexistent one.
+    """
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
+        return None
+
+    with cursor() as cur:
+        cur.execute(
+            "SELECT id, filename, source_key, source_content_type FROM documents"
+            " WHERE id = %s AND user_id = %s",
+            (document_id, user_id),
+        )
+        return _row(cur.fetchone())
 
 
 def delete_document(document_id: str, external_id: str) -> bool:

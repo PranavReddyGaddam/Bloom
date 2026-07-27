@@ -1,7 +1,11 @@
-"""Object storage for generated media (ROADMAP_HONEN 3.3).
+"""Object storage for binary media — generated audio and uploaded originals.
 
-Podcast audio is the first thing Bloom produces that is too big to live in a
-database row and too big to hand back inline with the JSON that describes it.
+Two kinds of thing live here, both too big for a database row and too big to
+hand back inline with the JSON that describes them: podcast audio Bloom
+generates (ROADMAP_HONEN 3.3), and the original PDF/DOCX/PPTX a student
+uploaded, kept so they can look at the real document rather than only its
+extracted text.
+
 This module is the whole storage boundary: everything else in the backend
 deals in opaque string keys and never imports boto3.
 
@@ -78,7 +82,7 @@ def _get_client():
                     import boto3
                 except ImportError as exc:  # pragma: no cover - deployment issue
                     raise StorageError(
-                        "boto3 is not installed; podcast audio storage is unavailable"
+                        "boto3 is not installed; object storage is unavailable"
                     ) from exc
                 _client = boto3.client("s3", region_name=os.getenv("AWS_REGION"))
     return _client
@@ -129,7 +133,7 @@ def _get_sync(key: str) -> bytes:
     if not bucket:
         path = _local_path(key)
         if not path.is_file():
-            raise StorageError("That audio file is no longer on disk")
+            raise StorageError("That file is no longer on disk")
         try:
             return path.read_bytes()
         except Exception as exc:
@@ -189,3 +193,30 @@ def podcast_key(user_id: str, podcast_id: str) -> str:
     user's media, and so an accidental listing is at least organized by owner.
     """
     return f"podcasts/{user_id}/{podcast_id}.mp3"
+
+
+def document_key(user_id: str, document_id: str, ext: str) -> str:
+    """Object key for one upload's original file.
+
+    `ext` must be an already-validated, lowercased extension (main.py checks
+    membership in SUPPORTED_EXTENSIONS before this is reached) — never a raw
+    client-supplied filename.
+
+    Deliberately a sibling of podcast_key rather than a generic
+    `media_key(prefix, ...)`: a shared helper would take the prefix as a
+    parameter, and that is precisely the string you least want callable from
+    outside this module, since it is what _local_path's traversal check
+    defends.
+
+    Keying on document_id rather than filename makes re-uploads correct for
+    free. memory_service._store_document reuses the existing row when
+    (user_id, filename) matches, so document_id is stable across re-uploads
+    and the new file overwrites the old object in place — no orphan, no
+    cleanup path.
+
+    NOTE: both key functions take the *external* (Supabase) user id, not
+    users.id. Callers in main.py hold the external id; anything inside
+    memory_service or db holds the internal one, and mixing them would
+    silently produce two different prefix layouts.
+    """
+    return f"documents/{user_id}/{document_id}{ext}"

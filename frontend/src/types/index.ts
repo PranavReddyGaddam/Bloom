@@ -140,6 +140,11 @@ export interface DocumentInfo {
   filename: string;
   created_at: string;
   chunk_count: number;
+  // Whether the file as uploaded was kept, and whether it can be paged
+  // through. False for documents ingested from a URL (no file ever existed)
+  // and for anything uploaded before originals were stored.
+  has_original: boolean;
+  is_pdf: boolean;
 }
 
 export interface DocumentContent {
@@ -148,6 +153,24 @@ export interface DocumentContent {
   created_at: string;
   text_content: string;
   word_count: number;
+  has_original: boolean;
+  is_pdf: boolean;
+}
+
+// What the viewer needs before it can render. `available: false` covers every
+// reason there's nothing to show — no stored file, an unreadable one, a
+// storage failure — so the UI has one branch rather than one per cause.
+export interface DocumentOriginalMeta {
+  available: boolean;
+  is_pdf: boolean;
+  filename: string;
+  page_count: number | null;
+  content_type: string | null;
+  // Ready-to-use absolute URLs carrying a signed grant in the query string,
+  // because an <img src> can't send an Authorization header. Substitute
+  // "{page}" in the template; all pages share one token.
+  page_url_template: string | null;
+  download_url: string | null;
 }
 
 // Spaced repetition

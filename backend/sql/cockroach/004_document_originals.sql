@@ -1,0 +1,32 @@
+-- Original uploaded files: keep the source document, not just its text.
+--
+-- The memory layer already persists every upload's *extracted text* (documents
+-- + document_chunks), which is what makes a past upload re-studiable. The file
+-- itself was never kept — main.py deletes the tempfile in a `finally` on every
+-- path — so a student could study the extracted text but never look at their
+-- actual slides again. That matters because extraction is lossy in ways the
+-- student can't see: title pages keep only their first line, figures become
+-- prose descriptions, and anything past MAX_ASSEMBLED_CHARS is dropped.
+--
+-- `source_key` is the object key within the configured bucket
+-- (storage_service.py owns the layout); the bytes are served back through an
+-- ownership-checked API route, so the bucket never needs to be public. NULL is
+-- a meaningful state and the common one: documents uploaded before this
+-- migration, documents ingested from a URL (no file ever existed), and uploads
+-- whose best-effort storage write failed all read as "no original". Collapsing
+-- those three into one nullable column is deliberate — the UI needs one branch
+-- rather than three.
+--
+-- `source_content_type` decides whether to offer the page viewer or a download
+-- link *without* fetching the object, and sets Content-Type on the download
+-- response — so the serving route never has to re-parse a client-supplied
+-- filename.
+--
+-- No page_count column on purpose: it can't be backfilled for existing rows,
+-- and the viewer opens the live PDF anyway. A column would be a second source
+-- of truth that is null exactly when you'd want it.
+--
+-- Apply after 001_schema.sql. Idempotent: safe to apply more than once.
+
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_key text;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_content_type text;

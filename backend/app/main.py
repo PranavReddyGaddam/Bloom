@@ -1,7 +1,8 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, RedirectResponse
 import asyncio
+import logging
 import os
 import json
 import tempfile
@@ -14,7 +15,7 @@ from pptx import Presentation
 from dotenv import load_dotenv
 
 from .ai_service import BloomAI
-from .models import SummaryRequest, QuizRequest, QuizResponse, SummaryResponse, FlashcardRequest, FlashcardResponse, AnswerCheckRequest, AnswerCheckResponse, AttemptBreakdownResponse, UserStatsResponse, UserAnalyticsResponse, AttemptRecapResponse, RecentAttempt, Subject, CreateSubjectRequest, TutorStartRequest, TutorStartResponse, TutorAnswerRequest, TutorAnswerResponse, TutorWrapRequest, TutorWrapResponse, DocumentInfo, DocumentContent, DueFlashcard, DueFlashcardsResponse, FlashcardReviewRequest, FlashcardReviewResponse, PretestStartRequest, PretestStartResponse, PretestSubmitRequest, PretestSubmitResponse, DueConceptReviewsResponse, PodcastSegment, PodcastResponse, PodcastInfo
+from .models import SummaryRequest, QuizRequest, QuizResponse, SummaryResponse, FlashcardRequest, FlashcardResponse, AnswerCheckRequest, AnswerCheckResponse, AttemptBreakdownResponse, UserStatsResponse, UserAnalyticsResponse, AttemptRecapResponse, RecentAttempt, Subject, CreateSubjectRequest, TutorStartRequest, TutorStartResponse, TutorAnswerRequest, TutorAnswerResponse, TutorWrapRequest, TutorWrapResponse, DocumentInfo, DocumentContent, DueFlashcard, DueFlashcardsResponse, FlashcardReviewRequest, FlashcardReviewResponse, PretestStartRequest, PretestStartResponse, PretestSubmitRequest, PretestSubmitResponse, DueConceptReviewsResponse, PodcastSegment, PodcastResponse, PodcastInfo, DocumentOriginalMeta
 from . import extraction_agent
 from . import url_ingest
 from . import tutor_agent
@@ -25,9 +26,16 @@ from . import auth
 from . import progress
 from . import tts_service
 from . import storage_service
+from . import pdf_render
 
 # Load environment variables
 load_dotenv()
+
+# The rest of the backend degrades silently by design — a failed side effect
+# must never fail the student's request. That is right, but it means a
+# misconfiguration can be invisible; this logger exists for the failures with
+# no user-visible symptom at all.
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Bloom API", version="1.0.0")
 
@@ -57,6 +65,15 @@ async def health_check():
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".pptx"}
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+# MIME type per accepted extension, for storing and serving the original file.
+# Keyed off the validated extension rather than the browser-supplied
+# UploadFile.content_type, which is client-controlled and frequently wrong.
+_CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
 
 @app.get("/progress/{progress_id}")
 async def get_progress(progress_id: str):
@@ -118,6 +135,32 @@ async def upload_pdf(
             )
         except Exception:
             pass
+
+        # Keep the original file so the student can look at the real document,
+        # not just its extracted text (extraction is lossy in ways they can't
+        # see: title pages lose all but their first line, figures become prose,
+        # anything past MAX_ASSEMBLED_CHARS is dropped).
+        #
+        # Best-effort and separately guarded from the memory step above: a
+        # storage failure must neither fail an upload the student waited
+        # through nor discard the similar_documents that step just computed.
+        # Logged rather than silently passed because this is the one failure
+        # here with no user-visible symptom at all — an un-widened S3 policy
+        # would leave every document with a null source_key and no error
+        # anywhere, which is how the feature ships "working" and does nothing.
+        if document_id:
+            try:
+                key = await storage_service.put_bytes(
+                    storage_service.document_key(user_id, document_id, ext),
+                    content,
+                    _CONTENT_TYPES[ext],
+                )
+                db.attach_document_source(document_id, key, _CONTENT_TYPES[ext])
+            except Exception:
+                logger.warning(
+                    "Could not store original file for document %s", document_id,
+                    exc_info=True,
+                )
 
         return {
             "filename": file.filename,
@@ -712,6 +755,173 @@ async def get_document_content(document_id: str, external_user_id: str = Depends
     if content is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return DocumentContent(**content)
+
+# --- Viewing the original upload -------------------------------------------
+# The extracted text is what gets studied, but extraction is lossy in ways the
+# student can't see. These routes serve the file they actually uploaded.
+
+
+async def _document_source_or_404(document_id: str, external_user_id: str, require_pdf: bool = False):
+    """Ownership-scoped lookup of a document's stored file.
+
+    Raises 404 for a foreign document, an unknown one, or one with no stored
+    file — all indistinguishable on purpose, so the routes never confirm that
+    someone else's document exists.
+    """
+    document = db.get_document_source(document_id, external_user_id)
+    if document is None or not document.get("source_key"):
+        raise HTTPException(status_code=404, detail="No original file for this document")
+    if require_pdf and document.get("source_content_type") != db.PDF_CONTENT_TYPE:
+        raise HTTPException(status_code=404, detail="This document is not a PDF")
+    return document
+
+
+async def _resolve_media_user(
+    resource_id: str, token: Optional[str], user_id: Optional[str],
+    authorization: Optional[str],
+) -> str:
+    """Authenticate a binary-media request by signed token or bearer header.
+
+    An <img src> / <a download> cannot set an Authorization header, so the
+    token carries the grant in the URL instead — the same constraint that
+    drives podcast audio playback. Authentication only; ownership is a
+    separate check the caller must still make.
+    """
+    if token and user_id:
+        if not auth.verify_media_token(token, resource_id, user_id):
+            raise HTTPException(status_code=403, detail="Invalid or expired link")
+        return user_id
+    return await auth.get_current_user_id(authorization)
+
+
+def _document_media_url(path: str, document_id: str, user_id: str, token: str) -> str:
+    """Absolute, self-authenticating URL for one of the media routes below.
+
+    Absolute because it lands in an <img src> on the frontend origin, where a
+    relative path would resolve against Next rather than the API.
+    """
+    base = os.getenv("PUBLIC_API_URL", "http://localhost:8000").rstrip("/")
+    query = urlencode({"token": token, "user_id": user_id})
+    return f"{base}/documents/{document_id}/{path}?{query}"
+
+
+@app.get("/documents/{document_id}/original/meta", response_model=DocumentOriginalMeta)
+async def get_document_original_meta(
+    document_id: str, external_user_id: str = Depends(auth.get_current_user_id),
+):
+    """What the viewer needs before rendering: is there a file, can it be
+    paged through, how many pages, and a token for the media URLs.
+
+    Every failure collapses to `available: false` rather than an error status.
+    A missing or unreadable original is a normal state — documents uploaded
+    before this feature and documents ingested from a URL have no file at all
+    — so the UI shows one honest line instead of an error.
+    """
+    document = db.get_document_source(document_id, external_user_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    filename = document["filename"]
+    content_type = document.get("source_content_type")
+    is_pdf = content_type == db.PDF_CONTENT_TYPE
+
+    if not document.get("source_key"):
+        return DocumentOriginalMeta(available=False, is_pdf=False, filename=filename)
+
+    pages = None
+    if is_pdf:
+        # The one place the PDF is opened to count pages. A corrupt or
+        # password-protected file fails here; it stays downloadable, because
+        # unreadable to us doesn't mean unreadable to the student.
+        try:
+            data = await storage_service.get_bytes(document["source_key"])
+            pages = await asyncio.to_thread(pdf_render.page_count, data)
+        except (storage_service.StorageError, pdf_render.RenderError):
+            logger.warning("Could not read original for document %s", document_id, exc_info=True)
+            is_pdf = False
+
+    # One token for the whole viewing session: the client substitutes {page}
+    # and every image load reuses the same grant.
+    token = auth.make_media_token(document_id, external_user_id)
+    return DocumentOriginalMeta(
+        available=True,
+        is_pdf=is_pdf,
+        filename=filename,
+        page_count=pages,
+        content_type=content_type,
+        page_url_template=(
+            _document_media_url("page/{page}", document_id, external_user_id, token)
+            if is_pdf else None
+        ),
+        download_url=_document_media_url("original", document_id, external_user_id, token),
+    )
+
+
+@app.get("/documents/{document_id}/page/{page_number}")
+async def get_document_page(
+    document_id: str,
+    page_number: int,
+    token: Optional[str] = Query(None),
+    user_id: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """One page of a stored PDF, rendered to PNG on demand."""
+    external_user_id = await _resolve_media_user(document_id, token, user_id, authorization)
+    document = await _document_source_or_404(document_id, external_user_id, require_pdf=True)
+
+    try:
+        data = await storage_service.get_bytes(document["source_key"])
+        png = await asyncio.to_thread(pdf_render.render_page, data, page_number)
+    except pdf_render.RenderError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except storage_service.StorageError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    # Caching is load-bearing, not polish: without it every page flip re-fetches
+    # the whole PDF from S3 and re-renders it. max-age matches the media token's
+    # lifetime, and `private` keeps a shared cache from ever holding it.
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": f"private, max-age={auth.MEDIA_TOKEN_TTL_SECONDS}"},
+    )
+
+
+@app.get("/documents/{document_id}/original")
+async def get_document_original(
+    document_id: str,
+    token: Optional[str] = Query(None),
+    user_id: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Download the file as uploaded.
+
+    The only way to see a DOCX or PPTX — rendering those would need LibreOffice
+    — and a useful escape hatch for PDFs whose pages we can't render.
+    """
+    external_user_id = await _resolve_media_user(document_id, token, user_id, authorization)
+    document = await _document_source_or_404(document_id, external_user_id)
+
+    # Unlike a rendered page, this is a direct object fetch, so S3 can serve it
+    # itself and 25 MB never crosses this process.
+    presigned = storage_service.presigned_url(document["source_key"])
+    if presigned:
+        return RedirectResponse(presigned)
+
+    try:
+        data = await storage_service.get_bytes(document["source_key"])
+    except storage_service.StorageError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    # The filename is client-supplied and has not been re-emitted anywhere
+    # since upload; quote it so it can't inject header syntax.
+    safe_name = os.path.basename(document["filename"]).replace('"', "")
+    return Response(
+        content=data,
+        media_type=document.get("source_content_type") or "application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+    )
+
 
 @app.delete("/documents/{document_id}")
 async def delete_document(document_id: str, external_user_id: str = Depends(auth.get_current_user_id)):

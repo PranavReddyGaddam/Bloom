@@ -21,6 +21,7 @@ import {
   TutorSource,
   DocumentInfo,
   DocumentContent,
+  DocumentOriginalMeta,
   DueFlashcardsResponse,
   FlashcardReviewResponse,
   ReviewGrade,
@@ -583,6 +584,22 @@ export const api = {
     if (!response.ok) {
       const error = await response.text();
       throw new APIError(`Failed to fetch document: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  // Whether a stored upload still has its original file, and what it takes to
+  // display it. Returns a media token the page/download URLs carry, so the
+  // viewer authenticates once and then loads images for the token's lifetime.
+  async getDocumentOriginalMeta(documentId: string): Promise<DocumentOriginalMeta> {
+    const response = await fetch(`${API_BASE_URL}/documents/${documentId}/original/meta`, {
+      headers: await authHeaders(),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to fetch document details: ${error}`, response.status);
     }
 
     return response.json();

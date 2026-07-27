@@ -132,6 +132,11 @@ class DocumentInfo(BaseModel):
     filename: str
     created_at: str
     chunk_count: int
+    # Whether the original file was kept, and whether it can be paged through.
+    # Defaulted false so anything constructing these without the new columns
+    # keeps working, and so a document predating the feature reads correctly.
+    has_original: bool = False
+    is_pdf: bool = False
 
 class DocumentContent(BaseModel):
     id: str
@@ -139,6 +144,30 @@ class DocumentContent(BaseModel):
     created_at: str
     text_content: str
     word_count: int
+    has_original: bool = False
+    is_pdf: bool = False
+
+class DocumentOriginalMeta(BaseModel):
+    """What the viewer needs before it can render anything.
+
+    `available` is false for every degraded case — no stored file, a storage
+    read failure, or a PDF we can't open — so the client has one branch rather
+    than one per cause.
+    """
+    available: bool
+    is_pdf: bool
+    filename: str
+    page_count: Optional[int] = None
+    content_type: Optional[str] = None
+    # Ready-to-use URLs rather than a bare token. A browser <img src> can't
+    # send an Authorization header, so the grant has to travel in the query
+    # string — and the server is the only side that already knows both the
+    # user id and the API's public base, so building them here saves the
+    # client from reassembling something it has no other reason to know.
+    # `page_url_template` contains the literal "{page}" for the client to
+    # substitute; every page shares one token.
+    page_url_template: Optional[str] = None
+    download_url: Optional[str] = None
 
 class TutorSource(BaseModel):
     """One document in a tutor session's material (ROADMAP_LEARNING 3).
