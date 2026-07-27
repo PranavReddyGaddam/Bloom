@@ -2,8 +2,8 @@
 
 import { useRef, useState } from 'react'
 import {
-  ArrowUp, BookOpen, ChevronDown, ClipboardList, FileText, GraduationCap, Link as LinkIcon,
-  Loader2, Paperclip, PencilLine, Sliders, Target, X,
+  ArrowUp, BookOpen, ChevronDown, ClipboardList, FileText, GraduationCap, Headphones,
+  Link as LinkIcon, Loader2, Paperclip, PencilLine, Sliders, Target, X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
@@ -30,6 +30,7 @@ const OUTPUTS: { value: StudyOutput; icon: React.ReactNode; label: string }[] = 
   { value: 'summary', icon: <ClipboardList className="h-4 w-4" />, label: 'Summary' },
   { value: 'flashcards', icon: <BookOpen className="h-4 w-4" />, label: 'Flashcards' },
   { value: 'quiz', icon: <PencilLine className="h-4 w-4" />, label: 'Quiz' },
+  { value: 'podcast', icon: <Headphones className="h-4 w-4" />, label: 'Podcast' },
   { value: 'tutor', icon: <GraduationCap className="h-4 w-4" />, label: 'Tutor' },
 ]
 
@@ -443,6 +444,27 @@ export function StudyBar({
                   </Select>
                 </div>
               </>
+            )}
+
+            {selected('podcast') && (
+              <div className="space-y-2">
+                <Label className="text-sm font-medium text-white/70">Episode Length</Label>
+                <Select
+                  value={formData.podcastLength}
+                  onValueChange={(value: StudyFormData['podcastLength']) =>
+                    setFormData(prev => ({ ...prev, podcastLength: value }))
+                  }
+                >
+                  <SelectTrigger className="bg-white/5 border-white/20 text-white">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="bg-[#0d1230] border-white/15 text-white">
+                    <SelectItem value="short">Short (~4 min)</SelectItem>
+                    <SelectItem value="medium">Medium (~7 min)</SelectItem>
+                    <SelectItem value="long">Long (~11 min)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
             )}
 
             {selected('quiz') && (

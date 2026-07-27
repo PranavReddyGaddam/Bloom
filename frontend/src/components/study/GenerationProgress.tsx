@@ -21,6 +21,7 @@ const LABELS: Record<StudyOutput, string> = {
   quiz: 'Quiz',
   pretest: 'Pretest',
   tutor: 'Tutor session',
+  podcast: 'Podcast',
 }
 
 interface GenerationProgressProps {

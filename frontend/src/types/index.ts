@@ -351,15 +351,19 @@ export interface QuizFormData {
 
 export type CardType = 'definition' | 'concept' | 'fact' | 'mixed';
 
+// How long an episode should run. The backend turns this into a target script
+// length rather than a hard duration — synthesis speed varies by voice.
+export type PodcastLength = 'short' | 'medium' | 'long';
+
 // What the student asked us to produce from their material. `summary`,
-// `flashcards` and `quiz` are artifacts — passive things that end up as tabs
-// on the lesson screen. `pretest` and `tutor` are interactive flows: selecting
-// them means that flow runs before generation (pretest) or is offered from the
-// lesson (tutor), so neither can be a tab.
-export type StudyOutput = 'summary' | 'flashcards' | 'quiz' | 'pretest' | 'tutor';
+// `flashcards`, `quiz` and `podcast` are artifacts — passive things that end up
+// as tabs on the lesson screen. `pretest` and `tutor` are interactive flows:
+// selecting them means that flow runs before generation (pretest) or is offered
+// from the lesson (tutor), so neither can be a tab.
+export type StudyOutput = 'summary' | 'flashcards' | 'quiz' | 'pretest' | 'tutor' | 'podcast';
 
 // Outputs that become a tab on the lesson screen, in tab order.
-export const ARTIFACT_OUTPUTS: StudyOutput[] = ['summary', 'flashcards', 'quiz'];
+export const ARTIFACT_OUTPUTS: StudyOutput[] = ['summary', 'flashcards', 'quiz', 'podcast'];
 
 export type StudyPreset = 'quick_review' | 'exam_prep' | 'deep_dive' | 'test_first' | 'custom';
 
@@ -401,6 +405,7 @@ export interface StudyFormData {
   summaryType: SummaryType;
   cardType: CardType;
   tutorMode: TutorMode;
+  podcastLength: PodcastLength;
   // What to generate, and which preset produced that selection.
   outputs: StudyOutput[];
   preset: StudyPreset;
@@ -425,4 +430,41 @@ export interface FlashcardResponse {
   total_cards: number;
   subject: string;
   card_type: string;
-} 
+}
+
+// Two-voice episode. The host asks the questions a student would ask; the
+// explainer answers them.
+export type PodcastSpeaker = 'host' | 'explainer';
+
+export interface PodcastSegment {
+  speaker: PodcastSpeaker;
+  text: string;
+  // Playback offset in seconds, measured from the synthesized audio. Null on a
+  // script-only episode (synthesis failed), where there is nothing to index
+  // into — the player falls back to estimating boundaries by word count.
+  start_seconds: number | null;
+}
+
+export interface PodcastResponse {
+  id: string;
+  title: string;
+  subject: string;
+  segments: PodcastSegment[];
+  // Presigned S3 URL, or null when synthesis failed after the script was
+  // written. That degraded case is expected, not exceptional: `segments` is
+  // still populated, so the transcript remains readable and `audio_error`
+  // carries a message safe to show the student. Never assume this is set.
+  audio_url: string | null;
+  duration_seconds: number | null;
+  audio_error: string | null;
+  created_at: string;
+}
+
+// Library-listing shape — no segments, so the podcasts list stays cheap.
+export interface PodcastInfo {
+  id: string;
+  title: string;
+  subject: string;
+  duration_seconds: number | null;
+  created_at: string;
+}

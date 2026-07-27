@@ -15,4 +15,12 @@ psycopg[binary,pool]==3.2.3
 pgvector==0.3.6
 yt-dlp==2026.7.4
 youtube-transcript-api==1.2.4
-trafilatura==2.1.0 
+trafilatura==2.1.0
+boto3==1.43.56
+# Podcast audio assembly: Deepgram returns raw linear16 PCM per segment, which
+# numpy concatenates and soundfile encodes to MP3 once at the end. Encoding
+# per segment instead would put MP3 frame boundaries mid-episode, which is
+# what produces audible seams between turns.
+numpy==2.5.0
+soundfile==0.14.0
+

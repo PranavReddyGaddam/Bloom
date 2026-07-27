@@ -389,4 +389,44 @@ class FlashcardReviewResponse(BaseModel):
     interval_days: float
     ease: float
     repetitions: int
-    due_at: str 
+    due_at: str
+
+# --- Podcast (ROADMAP_HONEN 3) ---
+
+class PodcastSegment(BaseModel):
+    # "host" asks the questions a student would ask; "explainer" answers.
+    # tts_service maps these two roles to voices, so no voice id ever reaches
+    # the API surface.
+    speaker: str  # "host" | "explainer"
+    text: str
+    # Playback offset in seconds, measured from the synthesized audio rather
+    # than estimated from word counts — so follow-along highlighting and
+    # click-to-seek land on the right turn. Null for a script-only episode,
+    # where there is no audio to index into.
+    start_seconds: Optional[float] = None
+
+class PodcastResponse(BaseModel):
+    id: str
+    title: str
+    subject: str
+    # Also the follow-along transcript the player renders, which is why the
+    # script is persisted alongside the audio rather than discarded after
+    # synthesis.
+    segments: List[PodcastSegment]
+    # Presigned S3 URL, or null when synthesis failed. Null with segments
+    # populated is the deliberate degraded case: the script survived, so the
+    # student still gets a readable episode instead of nothing.
+    audio_url: Optional[str] = None
+    duration_seconds: Optional[int] = None
+    # User-safe explanation of why audio is missing (out of credit, bad key),
+    # so the player can say something true rather than looking broken.
+    audio_error: Optional[str] = None
+    created_at: str
+
+class PodcastInfo(BaseModel):
+    """One episode in the library listing — no script, no audio."""
+    id: str
+    title: str
+    subject: str
+    duration_seconds: Optional[int] = None
+    created_at: str

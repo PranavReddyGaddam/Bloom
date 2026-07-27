@@ -1,10 +1,12 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends, Query
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends, Query, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 import asyncio
 import os
 import json
 import tempfile
+from datetime import datetime, timezone
+from urllib.parse import urlencode
 from typing import Optional, List
 from pydantic import BaseModel
 import docx
@@ -12,7 +14,7 @@ from pptx import Presentation
 from dotenv import load_dotenv
 
 from .ai_service import BloomAI
-from .models import SummaryRequest, QuizRequest, QuizResponse, SummaryResponse, FlashcardRequest, FlashcardResponse, AnswerCheckRequest, AnswerCheckResponse, AttemptBreakdownResponse, UserStatsResponse, UserAnalyticsResponse, AttemptRecapResponse, RecentAttempt, Subject, CreateSubjectRequest, TutorStartRequest, TutorStartResponse, TutorAnswerRequest, TutorAnswerResponse, TutorWrapRequest, TutorWrapResponse, DocumentInfo, DocumentContent, DueFlashcard, DueFlashcardsResponse, FlashcardReviewRequest, FlashcardReviewResponse, PretestStartRequest, PretestStartResponse, PretestSubmitRequest, PretestSubmitResponse, DueConceptReviewsResponse
+from .models import SummaryRequest, QuizRequest, QuizResponse, SummaryResponse, FlashcardRequest, FlashcardResponse, AnswerCheckRequest, AnswerCheckResponse, AttemptBreakdownResponse, UserStatsResponse, UserAnalyticsResponse, AttemptRecapResponse, RecentAttempt, Subject, CreateSubjectRequest, TutorStartRequest, TutorStartResponse, TutorAnswerRequest, TutorAnswerResponse, TutorWrapRequest, TutorWrapResponse, DocumentInfo, DocumentContent, DueFlashcard, DueFlashcardsResponse, FlashcardReviewRequest, FlashcardReviewResponse, PretestStartRequest, PretestStartResponse, PretestSubmitRequest, PretestSubmitResponse, DueConceptReviewsResponse, PodcastSegment, PodcastResponse, PodcastInfo
 from . import extraction_agent
 from . import url_ingest
 from . import tutor_agent
@@ -21,6 +23,8 @@ from . import memory_service
 from . import db
 from . import auth
 from . import progress
+from . import tts_service
+from . import storage_service
 
 # Load environment variables
 load_dotenv()
@@ -332,6 +336,191 @@ async def generate_flashcards(
         raise HTTPException(status_code=500, detail=f"Error generating flashcards: {str(e)}")
     finally:
         progress.clear(progress_id)
+
+def _podcast_audio_url(podcast_id: str, audio_key: str, user_id: str) -> str:
+    """Playback URL for an episode.
+
+    Prefers a presigned S3 URL so the browser streams straight from S3 with
+    range requests — scrubbing a long episode then costs the API nothing. When
+    there's no bucket (local-disk storage) or presigning fails, falls back to
+    the API route with a signed token in the query string.
+
+    The token is necessary because a browser `<audio src>` cannot send an
+    Authorization header, so the URL has to carry its own proof of access —
+    exactly the job presigning does on the S3 path.
+    """
+    presigned = storage_service.presigned_url(audio_key)
+    if presigned:
+        return presigned
+
+    # Absolute, because this URL goes into an <audio src> on the frontend
+    # origin — a relative path would resolve against Next, not the API.
+    base = os.getenv("PUBLIC_API_URL", "http://localhost:8000").rstrip("/")
+    token = auth.make_media_token(podcast_id, user_id)
+    query = urlencode({"token": token, "user_id": user_id})
+    return f"{base}/podcasts/{podcast_id}/audio?{query}"
+
+@app.post("/generate-podcast", response_model=PodcastResponse)
+async def generate_podcast(
+    text_content: str = Form(...),
+    subject: str = Form(...),
+    length: str = Form("medium"),  # "short", "medium", "long"
+    document_id: Optional[str] = Form(None),
+    progress_id: Optional[str] = Form(None),
+    focus_note: Optional[str] = Form(None),
+    user_id: str = Depends(auth.get_current_user_id)
+):
+    """Generate a two-speaker podcast episode from text content.
+
+    The script and the audio fail independently on purpose. Writing and
+    grounding the script is the expensive, valuable part; synthesis is a
+    separate service that can be out of credit or misconfigured. So a
+    synthesis failure still returns a 200 with the full script and an
+    `audio_error` the player can show — the student gets a readable episode
+    instead of losing a 30-second generation to someone else's billing.
+    """
+    if length not in ("short", "medium", "long"):
+        raise HTTPException(status_code=400, detail="length must be short, medium, or long")
+
+    reporter = progress.reporter(progress_id)
+
+    try:
+        script = await ai_service.generate_podcast_script(
+            text_content=text_content,
+            subject=subject,
+            length=length,
+            progress=reporter,
+            focus_note=focus_note,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generating podcast: {str(e)}")
+    finally:
+        progress.clear(progress_id)
+
+    segments = script["segments"]
+
+    # The row is created before synthesis because its id names the audio
+    # object in S3. A row whose audio_key stays null is the degraded episode.
+    try:
+        podcast_id = db.create_podcast(
+            user_id, subject, script["title"], segments, document_id=document_id,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error saving podcast: {str(e)}")
+
+    audio_url: Optional[str] = None
+    duration_seconds: Optional[int] = None
+    audio_error: Optional[str] = None
+
+    # Only the TTS key gates synthesis. Storage does not: without a bucket the
+    # audio is written to local disk instead, so a machine with a Deepgram key
+    # and no AWS setup still produces playable episodes.
+    if not tts_service.is_configured():
+        audio_error = (
+            "Audio generation isn't set up on this server, so this episode is "
+            "script-only."
+        )
+    else:
+        try:
+            audio, offsets, duration_seconds = await tts_service.synthesize_dialogue(
+                segments, client=ai_service._client, progress=reporter,
+            )
+            key = await storage_service.put_bytes(
+                storage_service.podcast_key(user_id, podcast_id), audio, "audio/mpeg",
+            )
+            # Fold the measured offsets back into the stored script, so a
+            # later GET /podcasts/{id} serves the same exact timings rather
+            # than the player having to re-estimate them.
+            for segment, start in zip(segments, offsets):
+                segment["start_seconds"] = start
+            db.attach_podcast_audio(podcast_id, key, duration_seconds, segments)
+            audio_url = _podcast_audio_url(podcast_id, key, user_id)
+        except tts_service.TTSError as e:
+            audio_error = e.user_message
+        except storage_service.StorageError as e:
+            audio_error = f"The episode was recorded but couldn't be stored: {e}"
+        except Exception as e:
+            audio_error = f"Audio synthesis failed: {str(e)}"
+        finally:
+            progress.clear(progress_id)
+
+    return PodcastResponse(
+        id=podcast_id,
+        title=script["title"],
+        subject=subject,
+        segments=[PodcastSegment(**s) for s in segments],
+        audio_url=audio_url,
+        duration_seconds=duration_seconds,
+        audio_error=audio_error,
+        created_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    )
+
+@app.get("/me/podcasts", response_model=List[PodcastInfo])
+async def get_my_podcasts(external_user_id: str = Depends(auth.get_current_user_id)):
+    """All of the signed-in user's episodes, newest first"""
+    try:
+        return [PodcastInfo(**p) for p in db.list_podcasts(external_user_id)]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching podcasts: {str(e)}")
+
+@app.get("/podcasts/{podcast_id}", response_model=PodcastResponse)
+async def get_podcast(podcast_id: str, external_user_id: str = Depends(auth.get_current_user_id)):
+    """One episode with its script and a fresh playback URL.
+
+    The URL is minted per request rather than stored: presigned URLs expire,
+    so a persisted one would be a link that works until it quietly doesn't.
+    """
+    podcast = db.get_podcast(podcast_id, external_user_id)
+    if podcast is None:
+        raise HTTPException(status_code=404, detail="Podcast not found")
+
+    audio_key = podcast.get("audio_key")
+    return PodcastResponse(
+        id=podcast["id"],
+        title=podcast["title"],
+        subject=podcast["subject"],
+        segments=[PodcastSegment(**s) for s in podcast["script"]],
+        audio_url=(
+            _podcast_audio_url(podcast["id"], audio_key, external_user_id)
+            if audio_key else None
+        ),
+        duration_seconds=podcast.get("duration_seconds"),
+        audio_error=None if audio_key else "This episode was never recorded as audio.",
+        created_at=podcast["created_at"],
+    )
+
+@app.get("/podcasts/{podcast_id}/audio")
+async def get_podcast_audio(
+    podcast_id: str,
+    token: Optional[str] = Query(None),
+    user_id: Optional[str] = Query(None),
+    authorization: Optional[str] = Header(None),
+):
+    """Stream an episode's audio through the API.
+
+    The fallback for when presigning isn't available. Accepts either a normal
+    bearer header or a signed `token` — a browser `<audio src>` can't set
+    headers, so the token is what makes the element work at all. Ownership is
+    still enforced either way: get_podcast is user-scoped, so a valid token for
+    someone else's episode finds nothing.
+    """
+    if token and user_id:
+        if not auth.verify_media_token(token, podcast_id, user_id):
+            raise HTTPException(status_code=403, detail="Invalid or expired audio link")
+        external_user_id = user_id
+    else:
+        external_user_id = await auth.get_current_user_id(authorization)
+
+    podcast = db.get_podcast(podcast_id, external_user_id)
+    if podcast is None or not podcast.get("audio_key"):
+        raise HTTPException(status_code=404, detail="Podcast audio not found")
+
+    try:
+        audio = await storage_service.get_bytes(podcast["audio_key"])
+    except storage_service.StorageError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return Response(content=audio, media_type="audio/mpeg")
 
 @app.get("/me/flashcards/due", response_model=DueFlashcardsResponse)
 async def get_my_due_flashcards(external_user_id: str = Depends(auth.get_current_user_id)):

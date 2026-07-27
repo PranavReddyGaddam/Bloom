@@ -107,6 +107,10 @@ config/secrets.*
 uploads/
 *.pdf
 
+# Generated podcast audio, when no S3 bucket is configured
+backend/media/
+*.mp3
+
 # Cache directories
 .cache/
 .parcel-cache/ 

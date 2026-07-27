@@ -26,7 +26,10 @@ import {
   ReviewGrade,
   PretestStartResponse,
   PretestSubmitResponse,
-  DueConceptReviewsResponse
+  DueConceptReviewsResponse,
+  PodcastLength,
+  PodcastResponse,
+  PodcastInfo
 } from '@/types';
 import { createClient } from '@/lib/supabase/client';
 
@@ -483,6 +486,75 @@ export const api = {
     if (!response.ok) {
       const error = await response.text();
       throw new APIError(`Failed to generate flashcards: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  // --- Podcast ---
+
+  // Slow: writes the script, then synthesizes both voices. Pass a progressId
+  // and poll getProgress so the wait is legible. A resolved promise doesn't
+  // mean there's audio — check `audio_url`/`audio_error` on the result.
+  async generatePodcast(
+    textContent: string,
+    subject: string,
+    length: PodcastLength,
+    documentId?: string | null,
+    progressId?: string,
+    focusNote?: string
+  ): Promise<PodcastResponse> {
+    const formData = new FormData();
+    formData.append('text_content', textContent);
+    formData.append('subject', subject);
+    formData.append('length', length);
+    if (documentId) {
+      formData.append('document_id', documentId);
+    }
+    if (progressId) {
+      formData.append('progress_id', progressId);
+    }
+    if (focusNote && focusNote.trim()) {
+      formData.append('focus_note', focusNote.trim());
+    }
+
+    const response = await fetch(`${API_BASE_URL}/generate-podcast`, {
+      method: 'POST',
+      headers: await authHeaders(),
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to generate podcast: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  async listPodcasts(): Promise<PodcastInfo[]> {
+    const response = await fetch(`${API_BASE_URL}/me/podcasts`, {
+      headers: await authHeaders(),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to fetch podcasts: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  // Re-fetch a stored episode. The audio URL is presigned and expires, so this
+  // is also how a previously-listened episode gets a fresh playable link.
+  async getPodcast(id: string): Promise<PodcastResponse> {
+    const response = await fetch(`${API_BASE_URL}/podcasts/${id}`, {
+      headers: await authHeaders(),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to fetch podcast: ${error}`, response.status);
     }
 
     return response.json();

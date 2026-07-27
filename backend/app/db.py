@@ -1183,3 +1183,90 @@ def clear_misconception(misconception_id: str) -> None:
     the mastery estimate is what carries the long-term record."""
     with cursor() as cur:
         cur.execute("DELETE FROM misconceptions WHERE id = %s", (misconception_id,))
+
+
+# --- Podcasts (ROADMAP_HONEN 3.3) ---------------------------------------------
+# The row holds the script and a pointer to the audio; the audio bytes live in
+# S3 (storage_service.py). audio_key is nullable on purpose — a script that was
+# written and grounded but failed synthesis is still worth keeping, and the
+# player degrades to a readable transcript.
+
+
+def create_podcast(
+    external_id: str, subject: str, title: str, segments: List[Dict],
+    document_id: Optional[str] = None,
+) -> str:
+    """Insert an episode's script and return its id.
+
+    Written before synthesis rather than after, because the id is what names
+    the audio object in S3 — the key can't be built until the row exists.
+    Audio details land later via attach_podcast_audio().
+    """
+    user_id = get_or_create_user(external_id)
+    with cursor() as cur:
+        cur.execute(
+            "INSERT INTO podcasts (user_id, document_id, subject, title, script)"
+            " VALUES (%s,%s,%s,%s,%s) RETURNING id",
+            (user_id, document_id, subject, title, Jsonb(segments)),
+        )
+        return str(cur.fetchone()["id"])
+
+
+def attach_podcast_audio(
+    podcast_id: str, audio_key: str, duration_seconds: Optional[int],
+    script: Optional[List[Dict]] = None,
+) -> None:
+    """Record where an episode's audio ended up, once synthesis succeeded.
+
+    Rewrites the script too when given one: synthesis is what produces the
+    per-segment playback offsets, so the stored script is only complete after
+    the audio exists.
+    """
+    with cursor() as cur:
+        if script is None:
+            cur.execute(
+                "UPDATE podcasts SET audio_key = %s, duration_seconds = %s WHERE id = %s",
+                (audio_key, duration_seconds, podcast_id),
+            )
+        else:
+            cur.execute(
+                "UPDATE podcasts SET audio_key = %s, duration_seconds = %s, script = %s"
+                " WHERE id = %s",
+                (audio_key, duration_seconds, Jsonb(script), podcast_id),
+            )
+
+
+def list_podcasts(external_id: str) -> List[Dict]:
+    """A user's episodes, newest first. Script omitted — the listing only
+    needs titles, and a script is several KB per row."""
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
+        return []
+
+    with cursor() as cur:
+        cur.execute(
+            "SELECT id, title, subject, duration_seconds, created_at FROM podcasts"
+            " WHERE user_id = %s ORDER BY created_at DESC",
+            (user_id,),
+        )
+        return _rows(cur.fetchall())
+
+
+def get_podcast(podcast_id: str, external_id: str) -> Optional[Dict]:
+    """One episode with its script and audio key, or None.
+
+    Ownership-scoped in the same query rather than checked afterwards: a
+    foreign episode must be indistinguishable from a nonexistent one, matching
+    get_tutor_session and get_document_content.
+    """
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
+        return None
+
+    with cursor() as cur:
+        cur.execute(
+            "SELECT id, title, subject, script, audio_key, duration_seconds, created_at"
+            " FROM podcasts WHERE id = %s AND user_id = %s",
+            (podcast_id, user_id),
+        )
+        return _row(cur.fetchone())

@@ -16,6 +16,7 @@ import {
   TutorStartResponse,
   PretestStartResponse,
   StudyOutput,
+  PodcastResponse,
   PRESETS
 } from '@/types'
 import { UploadStep } from '@/components/study/UploadStep'
@@ -126,6 +127,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
   const [summary, setSummary] = useState<SummaryResponse | null>(null)
   const [quiz, setQuiz] = useState<QuizResponse | null>(null)
   const [flashcards, setFlashcards] = useState<FlashcardResponse | null>(null)
+  const [podcast, setPodcast] = useState<PodcastResponse | null>(null)
   const [quizResult, setQuizResult] = useState<QuizResult | null>(null)
   const [userAnswers, setUserAnswers] = useState<UserAnswer[]>([])
   const [currentStep, setCurrentStep] = useState<'upload' | 'tutor' | 'pretest' | 'lesson'>(initialStep)
@@ -146,6 +148,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     summaryType: 'bullet_points',
     cardType: 'mixed',
     tutorMode: 'vibe_check',
+    podcastLength: 'medium',
     outputs: [...PRESETS.quick_review.outputs],
     preset: 'quick_review',
     focusNote: ''
@@ -359,8 +362,8 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     }
 
     const wanted = formData.outputs.filter(
-      (o): o is 'summary' | 'flashcards' | 'quiz' =>
-        o === 'summary' || o === 'flashcards' || o === 'quiz'
+      (o): o is 'summary' | 'flashcards' | 'quiz' | 'podcast' =>
+        o === 'summary' || o === 'flashcards' || o === 'quiz' || o === 'podcast'
     )
 
     setPretestFocus(focusConcepts ?? [])
@@ -379,6 +382,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     setSummary(null)
     setFlashcards(null)
     setQuiz(null)
+    setPodcast(null)
     setOutputProgress(
       Object.fromEntries(wanted.map(o => [o, { stage: null, status: 'running' as const }]))
     )
@@ -434,6 +438,20 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
             documentId, id, focusNote,
           ),
           setFlashcards,
+        )
+      }
+      if (output === 'podcast') {
+        // A podcast resolving successfully does not imply playable audio —
+        // the response carries the script with audio_url null when synthesis
+        // failed. That is a success for this row's purposes; the player says
+        // what went wrong with the audio.
+        return run(
+          'podcast',
+          (id) => api.generatePodcast(
+            textContent, formData.subjectName, formData.podcastLength,
+            documentId, id, focusNote,
+          ),
+          setPodcast,
         )
       }
       return run(
@@ -584,6 +602,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     setSummary(null)
     setQuiz(null)
     setFlashcards(null)
+    setPodcast(null)
     setQuizResult(null)
     setUserAnswers([])
     setTutorSession(null)
@@ -656,7 +675,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
             setTutorSession(null)
             // Back to the lesson if there is one to go back to — the tutor is
             // usually reached from it — otherwise to the bar.
-            setCurrentStep(summary || quiz || flashcards ? 'lesson' : 'upload')
+            setCurrentStep(summary || quiz || flashcards || podcast ? 'lesson' : 'upload')
           }}
           resetApp={resetApp}
           onPracticeConcepts={handlePracticeConcepts}
@@ -693,6 +712,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
         flaggedConcepts={pretestFocus}
         flashcards={flashcards}
         quiz={quiz}
+        podcast={podcast}
         quizResult={quizResult}
         userAnswers={userAnswers}
         currentQuestionIndex={currentQuestionIndex}

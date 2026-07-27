@@ -1055,4 +1055,257 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
                     "back": "Based on the content provided, this requires manual review as AI parsing failed.",
                     "category": subject
                 }]
-            } 
+            }
+
+    # --- Podcast (ROADMAP_HONEN 3.1) ------------------------------------------
+    # A two-speaker dialogue episode, for reviewing material away from a screen.
+    # Two speakers rather than a narrator because a host asking the questions a
+    # student would actually ask is a better listening experience than a
+    # read-aloud summary — the questions are half the pedagogy.
+    #
+    # The engine (Deepgram Aura-2) has no multi-speaker mode, so tts_service
+    # synthesizes each turn separately and joins them. That is an assembly
+    # concern, not a reason to write a single-voice script.
+
+    # Target segment counts per length option. A segment is one speaker turn of
+    # roughly 2-4 sentences, so these land near 3 / 6 / 11 minutes of audio.
+    PODCAST_LENGTHS = {
+        "short": {"segments": 10, "minutes": "3 to 4"},
+        "medium": {"segments": 18, "minutes": "6 to 7"},
+        "long": {"segments": 30, "minutes": "10 to 12"},
+    }
+
+    async def _verify_podcast_script(self, segments: List[Dict], text_content: str) -> Optional[Dict]:
+        """Check a drafted episode's factual claims against the source text.
+
+        Grounding matters more here than anywhere else in the pipeline: audio
+        does not invite scrutiny the way a written quiz answer does. A student
+        listening on a commute cannot cross-check a confident-sounding claim,
+        and there is no "show me the source" affordance mid-playback.
+
+        Returns {"unsupported": [indices], "notes": str | None} naming the
+        segments that assert something the source doesn't support. Returns
+        None if the check itself failed or returned unparseable JSON — callers
+        treat that as "assume grounded" (fail open, not closed), matching
+        _verify_question's rule, since this is a quality layer rather than a
+        correctness dependency.
+        """
+        numbered = "\n".join(
+            f"[{i}] {s.get('speaker')}: {s.get('text')}" for i, s in enumerate(segments)
+        )
+
+        prompt = f"""You are fact-checking a podcast script against the source text it was supposed to be
+based on. Be strict — flag a line only if it asserts something the source text does not state or
+support, not merely because the source says it differently or in less detail.
+
+Do NOT flag: conversational filler, questions, transitions, restatements, or a host summarizing
+what was just said. Flag ONLY substantive factual claims that the source does not support.
+
+Source text:
+{text_content}
+
+Script:
+{numbered}
+
+Respond with ONLY valid, minified JSON matching this schema, no text before or after:
+{{
+    "unsupported": [list of integer line numbers that assert unsupported facts, empty if all fine],
+    "notes": "one sentence naming the most serious problem, or null if none"
+}}"""
+
+        messages = [
+            {"role": "system", "content": self.base_system_message},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            response = await self._make_request(messages)
+        except Exception:
+            return None
+
+        parsed = self._parse_json_response(response)
+        if parsed is None:
+            return None
+
+        # The model returns line numbers; anything out of range or non-integer
+        # is dropped rather than trusted, since these index into the script.
+        raw = parsed.get("unsupported")
+        indices = []
+        if isinstance(raw, list):
+            for value in raw:
+                if isinstance(value, int) and 0 <= value < len(segments):
+                    indices.append(value)
+        return {"unsupported": indices, "notes": parsed.get("notes")}
+
+    async def _rewrite_podcast_segments(
+        self, segments: List[Dict], indices: List[int], text_content: str,
+    ) -> List[Dict]:
+        """Rewrite the flagged lines so they only assert what the source supports.
+
+        Rewriting rather than deleting, because a podcast is a *conversation*:
+        dropping a line leaves an answer with no question or a reply to
+        nothing. The replacement keeps the same speaker and conversational
+        role, so the episode still flows.
+
+        Fails open — if the rewrite call fails or comes back malformed, the
+        original segments are returned unchanged. An imperfectly grounded
+        episode beats no episode, and the flagged claims were the model's
+        best reading of the material in the first place.
+        """
+        if not indices:
+            return segments
+
+        flagged = "\n".join(
+            f"[{i}] {segments[i].get('speaker')}: {segments[i].get('text')}" for i in indices
+        )
+
+        prompt = f"""These lines from a podcast script assert things the source text does not support.
+Rewrite each one so it says only what the source actually supports, keeping the same speaker, the
+same conversational role (a question stays a question, an explanation stays an explanation), and
+roughly the same length. Do not add speaker tags or names — just the spoken words.
+
+Source text:
+{text_content}
+
+Lines to rewrite:
+{flagged}
+
+Respond with ONLY valid, minified JSON matching this schema, no text before or after:
+{{
+    "rewritten": [{{"index": 0, "text": "the corrected line"}}]
+}}"""
+
+        messages = [
+            {"role": "system", "content": self.base_system_message},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            response = await self._make_request(messages)
+        except Exception:
+            return segments
+
+        parsed = self._parse_json_response(response)
+        if not parsed or not isinstance(parsed.get("rewritten"), list):
+            return segments
+
+        revised = list(segments)
+        for entry in parsed["rewritten"]:
+            if not isinstance(entry, dict):
+                continue
+            index = entry.get("index")
+            text = entry.get("text")
+            if isinstance(index, int) and 0 <= index < len(revised) and isinstance(text, str) and text.strip():
+                revised[index] = {**revised[index], "text": text.strip()}
+        return revised
+
+    async def generate_podcast_script(
+        self, text_content: str, subject: str, length: str = "medium",
+        progress=None, focus_note: Optional[str] = None,
+    ) -> Dict:
+        """Write a grounded two-speaker podcast episode from the material.
+
+        Returns {"title", "segments": [{"speaker", "text"}], "grounding_note"}.
+        `speaker` is always "host" or "explainer" — tts_service maps those to
+        voice indices, so this layer never handles voice ids.
+
+        Raises on an unusable draft rather than returning a placeholder: unlike
+        a malformed flashcard, a fallback episode would be several minutes of
+        synthesized audio saying nothing, at real TTS cost.
+        """
+        def _report(stage: str):
+            if progress:
+                progress(stage)
+
+        spec = self.PODCAST_LENGTHS.get(length, self.PODCAST_LENGTHS["medium"])
+
+        # Smaller budget than flashcards/quiz (80k): a podcast synthesizes the
+        # material's arc rather than mining it for individual facts, and the
+        # grounding pass below re-sends this same text, so the budget is paid
+        # twice per episode.
+        text_content = self._truncate(text_content, 40000)
+
+        prompt = f"""Write a podcast episode script that teaches the following {subject} material to a student
+who is listening rather than reading — on a commute, walking, or doing dishes.
+
+Two speakers, in conversation:
+- "host": curious and interested, but NOT an expert. Asks the questions a student would actually
+  ask — including the obvious ones, the "wait, why does that matter?" ones, and the ones that
+  surface a common confusion. Never explains the material themselves.
+- "explainer": knows the material and teaches it clearly. Answers in plain spoken language, uses
+  concrete examples, and connects ideas to each other rather than listing them.
+
+Requirements:
+1. About {spec['segments']} segments total, alternating between the speakers, landing around
+   {spec['minutes']} minutes when read aloud.
+2. Each segment is 2-4 sentences. This is spoken dialogue — no monologues, no bullet points, no
+   headings, and nothing that only works visually (no "as you can see in the diagram", no formulas
+   read as symbols; say them in words or leave them out).
+3. Open with the host framing what the episode covers. Close with the explainer summarizing the two
+   or three things most worth remembering.
+4. Cover the material's genuinely important ideas, in an order that builds — do not just walk the
+   source top to bottom.
+5. Every factual claim must come from the source material below. Do not add outside facts, even
+   true ones. If the material doesn't cover something, the episode doesn't cover it either.
+6. Write plain spoken text only. No speaker names, no stage directions, no markdown, no speaker
+   tags of any kind — the speaker field already says who is talking.
+{self._focus_note_block(focus_note)}
+Source material:
+{text_content}
+
+Respond with ONLY valid, minified JSON matching this schema, no text before or after:
+{{
+    "title": "an episode title naming what it actually covers, under 60 characters",
+    "segments": [
+        {{"speaker": "host", "text": "..."}},
+        {{"speaker": "explainer", "text": "..."}}
+    ]
+}}"""
+
+        messages = [
+            {"role": "system", "content": self.base_system_message},
+            {"role": "user", "content": prompt}
+        ]
+
+        _report("Writing the script")
+        response = await self._make_request(messages)
+
+        parsed = self._parse_json_response(response)
+        if not parsed or not isinstance(parsed.get("segments"), list):
+            raise ValueError("Could not parse a podcast script from the model response")
+
+        # Keep only well-formed segments with a known speaker. An unknown
+        # speaker would silently become the host at synthesis time
+        # (SPEAKER_INDEX defaults to 0), putting an explanation in the
+        # questioner's voice — better to drop the line than mis-voice it.
+        segments = []
+        for segment in parsed["segments"]:
+            if not isinstance(segment, dict):
+                continue
+            speaker = segment.get("speaker")
+            text = segment.get("text")
+            if speaker in ("host", "explainer") and isinstance(text, str) and text.strip():
+                segments.append({"speaker": speaker, "text": text.strip()})
+
+        if len(segments) < 2:
+            raise ValueError("The generated podcast script had no usable dialogue")
+
+        _report("Checking it against your material")
+        verification = await self._verify_podcast_script(segments, text_content)
+
+        grounding_note = None
+        if verification and verification.get("unsupported"):
+            segments = await self._rewrite_podcast_segments(
+                segments, verification["unsupported"], text_content
+            )
+            grounding_note = verification.get("notes")
+
+        title = parsed.get("title")
+        if not isinstance(title, str) or not title.strip():
+            title = f"{subject} — audio review"
+
+        return {
+            "title": title.strip()[:120],
+            "segments": segments,
+            "grounding_note": grounding_note,
+        }
