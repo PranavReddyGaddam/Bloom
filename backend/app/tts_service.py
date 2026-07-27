@@ -48,6 +48,12 @@ SPEAK_URL = "https://api.deepgram.com/v1/speak"
 DEFAULT_HOST_VOICE = os.getenv("DEEPGRAM_VOICE_HOST", "aura-2-thalia-en")
 DEFAULT_EXPLAINER_VOICE = os.getenv("DEEPGRAM_VOICE_EXPLAINER", "aura-2-orpheus-en")
 
+# The roleplay character's voice. One voice for every character, deliberately:
+# `voice_style` shapes the LLM prompt instead, which is where perceived
+# characterization actually lives. Per-character voice selection is a v2 —
+# Aura-2's roster makes that attractive, but it is not what makes a scene work.
+DEFAULT_ROLEPLAY_VOICE = os.getenv("DEEPGRAM_VOICE_CHARACTER", "aura-2-thalia-en")
+
 # linear16 at 24 kHz. Deepgram's default sample rate, and high enough that the
 # single MP3 encode at the end is the only lossy step in the pipeline.
 SAMPLE_RATE = 24000
@@ -170,17 +176,27 @@ def _error_for_status(status: int) -> TTSError:
 
 async def _synthesize_one(
     text: str, voice: str, client: httpx.AsyncClient, semaphore: asyncio.Semaphore,
+    encoding: str = "linear16", container: str = "none",
 ) -> bytes:
-    """Raw PCM (linear16, headerless) for one piece of text."""
+    """Audio bytes for one piece of text.
+
+    Defaults to raw PCM (linear16, headerless) for the podcast path, which
+    concatenates segments as samples. The roleplay path overrides to MP3 —
+    generalizing here rather than copying this function means a Deepgram API
+    change is fixed once, for both callers.
+    """
     api_key = os.getenv("DEEPGRAM_API_KEY")
     params = {
         "model": voice,
-        "encoding": "linear16",
-        # No container: a WAV header per segment would land in the middle of
-        # the joined stream and be decoded as noise.
-        "container": "none",
-        "sample_rate": str(SAMPLE_RATE),
+        "encoding": encoding,
+        # For the podcast path, no container: a WAV header per segment would
+        # land in the middle of the joined stream and be decoded as noise.
+        "container": container,
     }
+    # sample_rate is meaningful for raw PCM; MP3 carries its own rate in the
+    # bitstream, and sending both is how you get a 422.
+    if encoding == "linear16":
+        params["sample_rate"] = str(SAMPLE_RATE)
     headers = {
         "Authorization": f"Token {api_key}",
         "Content-Type": "application/json",
@@ -312,3 +328,93 @@ async def synthesize_dialogue(
         raise TTSError("tts_encode_failed", f"Couldn't encode the episode: {exc}") from exc
 
     return buffer.getvalue(), offsets, round(len(full) / SAMPLE_RATE)
+
+
+async def synthesize_turn(
+    text: str, voice: Optional[str] = None, client: Optional[httpx.AsyncClient] = None,
+) -> bytes:
+    """MP3 bytes for one spoken line of roleplay dialogue.
+
+    Raises TTSError with the same codes as the podcast path — callers degrade
+    to showing the line as text rather than losing the turn.
+
+    **Plain HTTP, not the streaming WebSocket, and that is a considered
+    choice.** What streaming buys is time-to-first-audio, and its size is
+    bounded by what is already serialized ahead of it: ai_service._make_request
+    is non-streaming, so the entire reply text exists before the first byte of
+    synthesis is requested. A 1-3 sentence reply is ~4-8s of speech and
+    ~50-100KB of MP3 over an already-warm keep-alive pool — the realistic gap
+    between "first chunk at ~250ms" and "whole clip at ~600ms" is ~300ms on a
+    turn floor of 1-1.5s, invisible beside the LLM term.
+
+    Against that, streaming would cost: a second concurrent Deepgram WS per
+    session sharing one key's rate limit with Flux *and* any podcast job; the
+    mandatory Speak->Flush->Close sequence whose omission is a **silent hang**,
+    the worst failure signature this feature could have; flush-quota
+    bookkeeping; a read task and cancellation path per turn; and errors
+    arriving as close codes with none of _error_for_status's student-safe
+    mapping, so the "402 -> speak as text" path would need reimplementing.
+
+    HTTP reuses all of that for free.
+
+    **Revisit the moment ai_service grows a streaming _stream_request** — at
+    that point the reply text no longer exists up front, time-to-first-audio
+    stops being bounded by the LLM, and streaming Aura-2 over WS (with its
+    `Clear` message for barge-in) becomes the right call. This note exists so
+    that decision isn't re-litigated from scratch before then.
+    """
+    if not is_configured():
+        raise TTSError(
+            "tts_unconfigured",
+            "Audio generation isn't set up on this server (DEEPGRAM_API_KEY is missing).",
+        )
+
+    text = (text or "").strip()
+    if not text:
+        raise TTSError("tts_empty_script", "There was nothing to say.")
+
+    owned = client is None
+    http = client or httpx.AsyncClient(timeout=SYNTH_TIMEOUT)
+
+    # The same module-level semaphore the podcast path uses, so a roleplay turn
+    # and a concurrent podcast job can't jointly blow the shared rate limit —
+    # one key serves both, plus Flux.
+    semaphore = _turn_semaphore()
+
+    try:
+        # A reply is 1-3 sentences, so the split is a no-op in practice; it
+        # only matters if the model ignores its instruction, and a seam beats
+        # a 413.
+        pieces = _split_for_limit(text)
+        rendered = [
+            await _synthesize_one(
+                piece, voice or DEFAULT_ROLEPLAY_VOICE, http, semaphore,
+                encoding="mp3", container="none",
+            )
+            for piece in pieces
+        ]
+    finally:
+        if owned:
+            await http.aclose()
+
+    audio = b"".join(rendered)
+    if not audio:
+        raise TTSError("tts_empty_audio", "The audio service returned an empty recording.")
+    return audio
+
+
+_TURN_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+
+def _turn_semaphore() -> asyncio.Semaphore:
+    """The shared synthesis semaphore, created on the running loop.
+
+    Lazily built rather than at import time: an asyncio.Semaphore binds to the
+    loop that exists when it is constructed, and at import there may not be one
+    — a module-level semaphore is a classic source of "attached to a different
+    loop" errors under uvicorn's reload.
+    """
+    global _TURN_SEMAPHORE
+    if _TURN_SEMAPHORE is None:
+        _TURN_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENCY)
+    return _TURN_SEMAPHORE

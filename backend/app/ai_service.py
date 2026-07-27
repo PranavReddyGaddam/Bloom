@@ -1309,3 +1309,408 @@ Respond with ONLY valid, minified JSON matching this schema, no text before or a
             "segments": segments,
             "grounding_note": grounding_note,
         }
+
+    # --- Voice roleplay (ROADMAP_HONEN 4) -----------------------------------
+    # The scene is the delivery mechanism; the *grounded rubric* is the
+    # feature. Every criterion carries an `evidence` field naming the fact from
+    # the source that makes it checkable, and grading requires a verbatim quote
+    # from the student. Both exist so a criterion can't be marked met on the
+    # model's general knowledge of the topic — which is exactly what an
+    # ungrounded roleplay grader does, convincingly and uselessly.
+
+    # A spoken turn costs an LLM call, a TTS call, and the student's patience,
+    # so the reply cap is a latency and cost control as much as a style rule.
+    ROLEPLAY_MAX_HISTORY_TURNS = 12
+    ROLEPLAY_TRANSCRIPT_BUDGET = 6000
+
+    async def generate_roleplay_scenario(
+        self, text_content: str, concept: str, subject: str,
+    ) -> Dict:
+        """Invent a scene in which the student must use `concept` out loud.
+
+        Returns {"title", "character", "voice_style", "situation",
+        "student_role", "opening_line", "grounding_concepts", "rubric":
+        [{"id", "name", "evidence"}]}.
+
+        `evidence` is server-side only and never reaches the client — it names
+        the fact from the source that makes a criterion checkable, and shipping
+        it would hand the student the answer key to a scene they are being
+        graded on.
+
+        Raises rather than returning a canned scene: a fallback scenario would
+        be ungrounded by construction, which defeats the entire premise.
+        """
+        text_content = self._truncate(text_content, 40000)
+
+        prompt = f"""Design a short roleplay scene that forces a student to explain and use a {subject} concept out
+loud, in conversation, with someone who has a reason to ask about it.
+
+The concept the scene must exercise: {concept}
+
+Requirements:
+1. The character is a person with a concrete reason to need this explained — a colleague, a patient,
+   a client, a journalist, a skeptical manager. NOT a teacher, tutor, examiner, or quizmaster. The
+   student should feel they are helping someone, not being tested.
+2. The character does NOT know the material. They ask real questions, get confused in believable
+   ways, and push back when something doesn't add up to them. They never explain the concept
+   themselves and never grade the student.
+3. The situation is one specific moment, stated in 2-3 sentences: where they are, why the
+   conversation is happening now, and what the character wants by the end.
+4. "opening_line" is the character's first spoken line. It starts the conversation naturally and
+   invites the student to talk. One or two sentences, spoken language only.
+5. The rubric is 3-5 criteria naming what a good explanation must actually cover. Each needs:
+   - "name": what the student must do, in plain language a student could read before starting
+     (e.g. "Explains why the reaction needs a catalyst"). This IS shown to the student.
+   - "evidence": the specific fact, sentence, or relationship FROM THE SOURCE MATERIAL below that
+     makes this criterion checkable. Quote or closely paraphrase the source. If you cannot point to
+     something in the source, do not write that criterion.
+6. Every criterion must be satisfiable from the source material alone. Do not write a criterion that
+   requires outside knowledge, even correct outside knowledge.
+7. "grounding_concepts" is a flat list of 5-10 domain terms from the source that the student is
+   likely to say out loud in this scene — technical vocabulary, proper nouns, named quantities.
+
+Source material:
+{text_content}
+
+Respond with ONLY valid, minified JSON matching this schema, no text before or after:
+{{
+    "title": "a short scene title, under 60 characters",
+    "character": {{"name": "...", "role": "who they are and why they're asking"}},
+    "voice_style": "a few words describing how they speak, e.g. 'brisk, skeptical, interrupts'",
+    "situation": "2-3 sentences setting the scene",
+    "student_role": "who the student is playing, one sentence",
+    "opening_line": "the character's first spoken line",
+    "grounding_concepts": ["term", "term"],
+    "rubric": [
+        {{"id": "c1", "name": "...", "evidence": "..."}},
+        {{"id": "c2", "name": "...", "evidence": "..."}}
+    ]
+}}"""
+
+        messages = [
+            {"role": "system", "content": self.base_system_message},
+            {"role": "user", "content": prompt}
+        ]
+
+        response = await self._make_request(messages)
+        parsed = self._parse_json_response(response)
+        if not parsed or not isinstance(parsed.get("rubric"), list):
+            raise ValueError("Could not parse a roleplay scenario from the model response")
+
+        rubric = []
+        for index, row in enumerate(parsed["rubric"]):
+            if not isinstance(row, dict):
+                continue
+            name = row.get("name")
+            evidence = row.get("evidence")
+            # A criterion without evidence is exactly the ungrounded criterion
+            # this design exists to prevent, so drop it here rather than let
+            # _verify_scenario decide — that pass fails open.
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if not isinstance(evidence, str) or not evidence.strip():
+                continue
+            rubric.append({
+                "id": str(row.get("id") or f"c{index + 1}"),
+                "name": name.strip(),
+                "evidence": evidence.strip(),
+            })
+
+        if len(rubric) < 2:
+            raise ValueError("The generated scenario had too few grounded rubric criteria")
+
+        character = parsed.get("character")
+        if not isinstance(character, dict) or not character.get("name"):
+            character = {"name": "Alex", "role": character.get("role") if isinstance(character, dict) else "someone who needs this explained"}
+
+        concepts = [
+            term.strip() for term in (parsed.get("grounding_concepts") or [])
+            if isinstance(term, str) and term.strip()
+        ]
+
+        scenario = {
+            "title": str(parsed.get("title") or f"{subject} — roleplay").strip()[:120],
+            "character": character,
+            "voice_style": str(parsed.get("voice_style") or "warm, curious").strip(),
+            "situation": str(parsed.get("situation") or "").strip(),
+            "student_role": str(parsed.get("student_role") or "yourself").strip(),
+            "opening_line": str(parsed.get("opening_line") or "").strip(),
+            # Deduped, order preserved: these become one `keyterm` query param
+            # each on the STT socket, and Flux takes a bounded number.
+            "grounding_concepts": list(dict.fromkeys(concepts))[:10],
+            "rubric": rubric,
+            "concept": concept,
+        }
+
+        verification = await self._verify_scenario(scenario, text_content)
+        if verification:
+            unsupported = {
+                str(cid) for cid in (verification.get("unsupported_ids") or [])
+            }
+            if unsupported:
+                kept = [row for row in rubric if row["id"] not in unsupported]
+                # Dropping rather than regenerating: a regenerated criterion
+                # needs its own verification pass, and an unbounded
+                # generate-verify loop on a 10-30s pipeline is worse than a
+                # shorter, honest rubric. If almost nothing survives the
+                # verifier is more likely wrong than the generator, so keep
+                # them all rather than ship a 1-criterion scene.
+                if len(kept) >= 2:
+                    scenario["rubric"] = kept
+
+        return scenario
+
+    async def _verify_scenario(self, scenario: Dict, text_content: str) -> Optional[Dict]:
+        """Check each rubric criterion's `evidence` against the source.
+
+        Returns {"unsupported_ids": [...]} or None if the verification call
+        itself failed or returned unparseable JSON — callers treat None as
+        "assume grounded" (fail open, not closed), matching _verify_question.
+        This is a quality layer over an already-grounded prompt, not a
+        correctness dependency.
+        """
+        rows = "\n".join(
+            f"- {row['id']}: {row['name']} | claimed evidence: {row['evidence']}"
+            for row in scenario.get("rubric", [])
+        )
+
+        prompt = f"""You are fact-checking a grading rubric against its source text. For each criterion, decide
+whether the claimed evidence is actually present in the source. Be strict — the evidence must be
+stated or clearly supported by the source, not merely plausible, not merely true in general.
+
+Source text:
+{text_content}
+
+Criteria:
+{rows}
+
+Respond with ONLY valid, minified JSON matching this schema, no text before or after:
+{{
+    "unsupported_ids": ["the id of each criterion whose evidence is NOT in the source"]
+}}
+
+Return an empty array if every criterion is supported."""
+
+        messages = [
+            {"role": "system", "content": self.base_system_message},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            response = await self._make_request(messages)
+        except Exception:
+            return None
+
+        return self._parse_json_response(response)
+
+    async def roleplay_reply(
+        self, scenario: Dict, history: List[Dict], utterance: str,
+        source_excerpt: str = "",
+    ) -> Optional[Dict]:
+        """The character's next spoken line.
+
+        Returns {"text"} or None if the call failed — the caller degrades to an
+        in-character stall rather than dropping the turn, since a silent
+        character reads as a broken app.
+
+        Only the last ROLEPLAY_MAX_HISTORY_TURNS turns go into the prompt; the
+        full history is kept by the caller for grading. A long scene otherwise
+        grows the prompt without improving the reply.
+        """
+        character = scenario.get("character") or {}
+        recent = history[-self.ROLEPLAY_MAX_HISTORY_TURNS:]
+
+        transcript = "\n".join(
+            f"{'Student' if turn.get('role') == 'student' else character.get('name', 'You')}: {turn.get('text', '')}"
+            for turn in recent
+        )
+
+        system = f"""You are {character.get('name', 'a person')} — {character.get('role', 'someone who needs this explained')}.
+You speak like this: {scenario.get('voice_style', 'warm, curious')}.
+
+The situation: {scenario.get('situation', '')}
+The person you are talking to is: {scenario.get('student_role', 'someone who knows this material')}.
+
+What you know about the topic comes only from what they tell you. You are NOT a teacher, tutor, or
+examiner, and you must never behave like one.
+
+Rules you follow without exception:
+1. Stay in character. Never break the scene, never mention that this is a roleplay, an exercise, or
+   a practice session.
+2. Reply in 1 to 3 sentences of natural spoken dialogue. No markdown, no lists, no stage directions,
+   no speaker name prefix.
+3. Never mention, hint at, or allude to any grading criteria, rubric, or checklist. You are unaware
+   any such thing exists.
+4. When they say something that contradicts what you have been told, or that doesn't add up, push
+   back **in character** — confused, skeptical, or asking a follow-up. Do not correct them with
+   facts you would have no way of knowing, and do not switch into a teaching voice.
+5. Ask follow-up questions that a genuinely curious non-expert would ask.
+
+Reference material you may use ONLY to notice when something sounds off — never to lecture from:
+{self._truncate(source_excerpt, 4000)}"""
+
+        prompt = f"""The conversation so far:
+{transcript or '(the scene is just beginning)'}
+
+They just said: {utterance}
+
+Reply as {character.get('name', 'yourself')}, in character, in 1-3 sentences. Respond with ONLY valid,
+minified JSON matching this schema, no text before or after:
+{{
+    "text": "your spoken reply"
+}}"""
+
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            response = await self._make_request(messages)
+        except Exception:
+            return None
+
+        parsed = self._parse_json_response(response)
+        if not parsed or not isinstance(parsed.get("text"), str) or not parsed["text"].strip():
+            return None
+        return {"text": parsed["text"].strip()}
+
+    def _budget_transcript(self, transcript: List[Dict], character_name: str) -> str:
+        """Render a transcript for grading, keeping the opening and the tail.
+
+        The middle is what gets cut, because the opening establishes the scene
+        and the tail is where the student's best explanation usually lands. The
+        elision is marked explicitly so the grader knows it is seeing a cut and
+        doesn't conclude the student never covered something.
+        """
+        lines = [
+            f"{'Student' if turn.get('role') == 'student' else character_name}: {turn.get('text', '')}"
+            for turn in transcript
+        ]
+        full = "\n".join(lines)
+        if len(full) <= self.ROLEPLAY_TRANSCRIPT_BUDGET:
+            return full
+
+        head = "\n".join(lines[:2])
+        tail_lines: List[str] = []
+        used = len(head)
+        for line in reversed(lines[2:]):
+            if used + len(line) + 1 > self.ROLEPLAY_TRANSCRIPT_BUDGET:
+                break
+            tail_lines.append(line)
+            used += len(line) + 1
+
+        return head + "\n[…]\n" + "\n".join(reversed(tail_lines))
+
+    async def grade_roleplay(
+        self, transcript: List[Dict], scenario: Dict,
+    ) -> Optional[Dict]:
+        """Grade the scene against its grounded rubric.
+
+        Returns {"score", "criteria": [{"id", "name", "met", "evidence_quote",
+        "feedback"}], "summary"}. Returns None if the call failed or returned
+        unparseable JSON — the caller then emits an honest ungraded result
+        rather than marking everything met, because failing *generous* here
+        tells a student they demonstrated things they never said.
+
+        The score is computed here in Python, never taken from the model: a
+        model asked for both judgments and their arithmetic will occasionally
+        return a score that doesn't match its own criteria.
+        """
+        character_name = (scenario.get("character") or {}).get("name", "Character")
+        rubric = scenario.get("rubric") or []
+        if not rubric:
+            return None
+
+        rows = "\n".join(
+            f"- {row['id']}: {row['name']}\n  what counts as meeting it: {row['evidence']}"
+            for row in rubric
+        )
+
+        prompt = f"""You are grading a student's spoken performance in a roleplay. The student was playing:
+{scenario.get('student_role', 'themselves')}. They were talking to {character_name}.
+
+Grade ONLY what the student actually said. Judge substance over wording — accept synonyms,
+paraphrase, and informal spoken phrasing, including false starts and self-corrections.
+
+For each criterion, decide whether the student met it, and if so, quote the student's own words that
+show it. The quote must be copied VERBATIM from a "Student:" line in the transcript below. If you
+cannot find such a quote, the criterion is NOT met — no matter how likely it is the student knew it.
+
+Criteria:
+{rows}
+
+Transcript:
+{self._budget_transcript(transcript, character_name)}
+
+Respond with ONLY valid, minified JSON matching this schema, no text before or after:
+{{
+    "criteria": [
+        {{"id": "c1", "met": true or false,
+          "evidence_quote": "the student's exact words, or null if not met",
+          "feedback": "one sentence: what they showed, or what was missing"}}
+    ],
+    "summary": "2-3 sentences on how the conversation went overall, addressed to the student as 'you'"
+}}"""
+
+        messages = [
+            {"role": "system", "content": self.base_system_message},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            response = await self._make_request(messages)
+        except Exception:
+            return None
+
+        parsed = self._parse_json_response(response)
+        if not parsed or not isinstance(parsed.get("criteria"), list):
+            return None
+
+        graded = {}
+        for row in parsed["criteria"]:
+            if isinstance(row, dict) and row.get("id") is not None:
+                graded[str(row["id"])] = row
+
+        # Rebuild rather than pass the parse through: the rubric here is the
+        # server's, so the model cannot add, drop, or rename a criterion, and
+        # every field lands with a known type.
+        criteria: List[Dict] = []
+        for row in rubric:
+            result = graded.get(row["id"]) or {}
+            quote = result.get("evidence_quote")
+            quote = quote.strip() if isinstance(quote, str) else None
+            met = bool(result.get("met"))
+            feedback = result.get("feedback")
+            feedback = feedback.strip() if isinstance(feedback, str) else None
+
+            # Enforce the quote in code, not just in the prompt. Without this
+            # step "require a quote" is a suggestion, and the whole
+            # anti-hallucination property of the field evaporates the first
+            # time the model marks a criterion met on the strength of the
+            # topic rather than the student.
+            if met and not quote:
+                met = False
+                feedback = (
+                    "We couldn't find where you covered this in the transcript."
+                    if not feedback else feedback
+                )
+
+            criteria.append({
+                "id": row["id"],
+                "name": row["name"],
+                "met": met,
+                "evidence_quote": quote if met else None,
+                "feedback": feedback,
+            })
+
+        met_count = sum(1 for row in criteria if row["met"])
+        summary = parsed.get("summary")
+
+        return {
+            "score": round(met_count / len(criteria) * 100, 1),
+            "met_count": met_count,
+            "total": len(criteria),
+            "criteria": criteria,
+            "summary": summary.strip() if isinstance(summary, str) else None,
+        }

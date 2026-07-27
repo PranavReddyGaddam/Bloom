@@ -30,7 +30,9 @@ import {
   DueConceptReviewsResponse,
   PodcastLength,
   PodcastResponse,
-  PodcastInfo
+  PodcastInfo,
+  RoleplayStartResponse,
+  RoleplayResult
 } from '@/types';
 import { createClient } from '@/lib/supabase/client';
 
@@ -47,6 +49,21 @@ async function authHeaders(): Promise<Record<string, string>> {
   const supabase = createClient();
   const { data: { session } } = await supabase.auth.getSession();
   return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {};
+}
+
+// The same token authHeaders() wraps, unwrapped. A websocket handshake can't
+// carry an Authorization header, so the roleplay socket sends this in its
+// first frame instead — never as a query parameter, where it would land in
+// server access logs and browser history.
+export async function getAccessToken(): Promise<string | null> {
+  const supabase = createClient();
+  const { data: { session } } = await supabase.auth.getSession();
+  return session?.access_token ?? null;
+}
+
+// ws:// or wss:// URL for a backend path, matching API_BASE_URL's scheme.
+export function wsUrl(path: string): string {
+  return `${API_BASE_URL.replace(/^http/, 'ws')}${path}`;
 }
 
 export const api = {
@@ -444,6 +461,68 @@ export const api = {
     if (!response.ok) {
       const error = await response.text();
       throw new APIError(`Failed to submit answer: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  // --- Voice roleplay (ROADMAP_HONEN 4) ---
+  // The session is created here over HTTP; the live conversation runs over the
+  // websocket that useRoleplaySocket opens against this session_id.
+
+  async startRoleplay(
+    subject: string,
+    documents: TutorSource[],
+    concept?: string,
+    progressId?: string,
+    documentId?: string | null
+  ): Promise<RoleplayStartResponse> {
+    const response = await fetch(`${API_BASE_URL}/roleplay/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+      body: JSON.stringify({
+        subject,
+        text_content: '',
+        ...(documents && documents.length > 0 ? { documents } : {}),
+        ...(concept ? { concept } : {}),
+        ...(progressId ? { progress_id: progressId } : {}),
+        ...(documentId ? { document_id: documentId } : {}),
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to start roleplay: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  // Grade over plain HTTP so a dead socket never costs the student their
+  // result — this is the path the client falls back to when the WS drops.
+  async endRoleplay(sessionId: string): Promise<RoleplayResult> {
+    const response = await fetch(`${API_BASE_URL}/roleplay/end`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(await authHeaders()) },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to grade roleplay: ${error}`, response.status);
+    }
+
+    return response.json();
+  },
+
+  async getRoleplayResult(sessionId: string): Promise<RoleplayResult> {
+    const response = await fetch(`${API_BASE_URL}/roleplay/${sessionId}/result`, {
+      headers: await authHeaders(),
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new APIError(`Failed to fetch roleplay result: ${error}`, response.status);
     }
 
     return response.json();

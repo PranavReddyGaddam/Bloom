@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -29,6 +30,32 @@ def _get_auth_client() -> Client:
     return _auth_client
 
 
+async def verify_bearer_token(token: str) -> Optional[str]:
+    """Resolve a Supabase access token to its user's external_id, or None.
+
+    Returns rather than raises because the websocket path can't use
+    HTTPException: a failed WS auth has to close the socket with a status code,
+    not unwind through FastAPI's HTTP error handling. get_current_user_id below
+    is the HTTP-shaped wrapper.
+
+    The Supabase client is synchronous, so the call goes through a thread. It
+    runs on every authenticated request, and blocking the event loop there is
+    survivable for REST but not for a real-time feature sharing the same loop.
+    """
+    if not token:
+        return None
+
+    try:
+        result = await asyncio.to_thread(_get_auth_client().auth.get_user, token)
+    except Exception:
+        return None
+
+    if not result or not result.user:
+        return None
+
+    return result.user.id
+
+
 async def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
     """FastAPI dependency: verifies the bearer token against Supabase Auth
     and returns the authenticated user's Supabase Auth UUID (external_id).
@@ -36,17 +63,11 @@ async def get_current_user_id(authorization: Optional[str] = Header(None)) -> st
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or malformed Authorization header")
 
-    token = authorization.removeprefix("Bearer ").strip()
-
-    try:
-        result = _get_auth_client().auth.get_user(token)
-    except Exception:
+    user_id = await verify_bearer_token(authorization.removeprefix("Bearer ").strip())
+    if not user_id:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    if not result or not result.user:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-    return result.user.id
+    return user_id
 
 
 def _media_secret() -> bytes:

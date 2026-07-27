@@ -299,6 +299,68 @@ export interface TutorStartResponse {
   mode: TutorMode;
 }
 
+// --- Voice roleplay (ROADMAP_HONEN 4) ---
+
+export interface RoleplayCharacter {
+  name: string;
+  role: string;
+}
+
+// The rubric as the client may see it: names only. Each criterion's
+// `evidence` — the source fact that makes it checkable — stays server-side.
+export interface RoleplayCriterion {
+  id: string;
+  name: string;
+}
+
+export interface RoleplayScenario {
+  title?: string | null;
+  character?: RoleplayCharacter | null;
+  situation?: string | null;
+  student_role?: string | null;
+  opening_line?: string | null;
+  // Shown before the scene starts, on purpose: knowing what a good
+  // explanation covers is the pedagogy, not a leak.
+  rubric: RoleplayCriterion[];
+}
+
+export interface RoleplayStartResponse {
+  session_id: string;
+  scenario: RoleplayScenario;
+  opening_line?: string | null;
+  grounding_concepts: string[];
+}
+
+export interface RoleplayTurn {
+  role: 'student' | 'character';
+  text: string;
+  turn_id: number;
+}
+
+export interface RoleplayGradedCriterion {
+  id: string;
+  name: string;
+  met: boolean;
+  // Never set when met is false — the backend downgrades a quoteless "met".
+  evidence_quote?: string | null;
+  feedback?: string | null;
+}
+
+export interface RoleplayResult {
+  // Null when the scene couldn't be graded: an honest absence, never a zero
+  // the student didn't earn and never an all-met result they didn't earn.
+  score?: number | null;
+  met_count?: number | null;
+  total?: number | null;
+  criteria: RoleplayGradedCriterion[];
+  summary?: string | null;
+  // Set only when graded is false: why there's no score, in plain language.
+  message?: string | null;
+  graded: boolean;
+  // Always present, graded or not.
+  transcript: RoleplayTurn[];
+}
+
 export interface ConfidenceBucket {
   confidence: 'low' | 'medium' | 'high';
   answered: number;

@@ -65,6 +65,20 @@ EVIDENCE_WEIGHT = {
     "fresh_wrong": 1.0,
     "variant_wrong": 1.5,
     "recheck_wrong": 1.5,
+    # Roleplay (ROADMAP_HONEN 4). Belongs in this table rather than a separate
+    # constant — it is the same kind of judgment, differing only in how the
+    # evidence was gathered. 0.6 sits just above fresh_correct: explaining a
+    # concept aloud, unprompted, with a verbatim quote to show for it, is
+    # better evidence than picking the right option once. It stays well under
+    # variant_correct because a roleplay criterion is graded by a model
+    # reading a conversation, not by a right/wrong answer key.
+    #
+    # Both polarities are defined because every lookup here is an unguarded
+    # subscript keyed `{kind}_{correct|wrong}`. An unmet criterion is weak
+    # evidence of *not* understanding — the student may simply never have been
+    # asked about it in the scene — so the wrong side is lighter than fresh.
+    "roleplay_correct": 0.6,
+    "roleplay_wrong": 0.6,
 }
 
 # How the student's self-reported confidence scales the mastery delta:

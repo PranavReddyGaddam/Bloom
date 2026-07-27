@@ -23,4 +23,10 @@ boto3==1.43.56
 # what produces audible seams between turns.
 numpy==2.5.0
 soundfile==0.14.0
+# Roleplay STT: the client half of the Deepgram Flux socket. Present
+# transitively via uvicorn[standard], but pinned directly because stt_service
+# imports it by name and relies on the `additional_headers=` spelling, which
+# is >=12 (it was `extra_headers` before). A transitive dependency that the
+# code imports directly is a break waiting for an unrelated upgrade.
+websockets==15.0.1
 

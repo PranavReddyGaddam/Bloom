@@ -857,6 +857,218 @@ def _complete_tutor_session_tx(session_id: str, session: Dict, total: int,
             )
 
 
+# --- Roleplay session persistence (ROADMAP_HONEN 4) ---------------------------
+# Roleplay shares the tutor_sessions table (see 005_roleplay.sql) but keeps its
+# own field tuple. Extending _TUTOR_STATE_FIELDS would have been the obvious
+# move and is unsafe: create_tutor_session subscripts `session[field]` bare, so
+# a new field raises KeyError on every existing tutor start unless
+# tutor_agent.start_session's dict changes in the same commit. Parallel
+# structures cost four short functions and make the two modes independent.
+#
+# `concepts` and `checkpoint_shown` appear in both tuples on purpose — same
+# columns, same meaning — which is why those two names must stay identical.
+
+_ROLEPLAY_STATE_FIELDS = (
+    "scenario", "transcript", "rubric_result", "concepts",
+    "turns_taken", "checkpoint_shown",
+)
+
+# jsonb columns among the above. turns_taken is an int and checkpoint_shown a
+# bool; wrapping either in Jsonb() would write a jsonb scalar into a non-jsonb
+# column and fail.
+_ROLEPLAY_JSONB_FIELDS = frozenset({
+    "scenario", "transcript", "rubric_result", "concepts",
+})
+
+
+def _roleplay_state_param(field: str, value):
+    """Adapt one _ROLEPLAY_STATE_FIELDS value for psycopg."""
+    if field in _ROLEPLAY_JSONB_FIELDS:
+        # scenario and rubric_result are both nullable and both start NULL.
+        # Jsonb(None) writes a jsonb 'null', which reads back as the *string*
+        # null rather than None — get_roleplay_session distinguishes "not
+        # generated yet" from "generated as null", so keep them distinct.
+        return None if value is None else Jsonb(value)
+    return value
+
+
+def create_roleplay_session(external_id: str, session: Dict) -> str:
+    """Insert a new active roleplay session and return its DB-generated id."""
+    user_id = get_or_create_user(external_id)
+
+    state_cols = ", ".join(_ROLEPLAY_STATE_FIELDS)
+    placeholders = ", ".join(["%s"] * len(_ROLEPLAY_STATE_FIELDS))
+
+    with cursor() as cur:
+        cur.execute(
+            f"INSERT INTO tutor_sessions"
+            f" (user_id, subject, text_content, sources, mode, {state_cols})"
+            f" VALUES (%s, %s, %s, %s, 'roleplay', {placeholders}) RETURNING id",
+            (
+                user_id,
+                session["subject"],
+                session["text_content"],
+                Jsonb(session["sources"]) if session.get("sources") is not None else None,
+                # .get rather than the tutor's bare subscript: this is new code
+                # and there's no reason to bake in the footgun that makes
+                # extending _TUTOR_STATE_FIELDS unsafe. A missing field writes
+                # NULL, which every column here tolerates.
+                *[_roleplay_state_param(f, session.get(f)) for f in _ROLEPLAY_STATE_FIELDS],
+            ),
+        )
+        return str(cur.fetchone()["id"])
+
+
+def get_roleplay_session(session_id: str, external_id: str) -> Optional[Dict]:
+    """Load an active roleplay session, scoped to the requesting user.
+
+    Ownership lives in the WHERE clause, so a foreign session is
+    indistinguishable from a nonexistent one — both return None, and the
+    caller 404s. That is the same rule tutor_agent._load_session follows.
+    """
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
+        return None
+
+    state_cols = ", ".join(_ROLEPLAY_STATE_FIELDS)
+    with cursor() as cur:
+        cur.execute(
+            f"SELECT subject, text_content, sources, {state_cols}"
+            f" FROM tutor_sessions"
+            f" WHERE id = %s AND user_id = %s AND mode = 'roleplay'"
+            f"   AND status = 'active'",
+            (session_id, user_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+
+    return {
+        "user_id": external_id,
+        "subject": row["subject"],
+        "text_content": row["text_content"],
+        "sources": row.get("sources") or [{
+            "text_content": row["text_content"],
+            "filename": row["subject"],
+            "document_id": None,
+        }],
+        "mode": "roleplay",
+        **{field: row[field] for field in _ROLEPLAY_STATE_FIELDS},
+        "updated_at": time.time(),
+    }
+
+
+def get_roleplay_result(session_id: str, external_id: str) -> Optional[Dict]:
+    """A finished scene's rubric result and transcript, scoped to its owner.
+
+    Separate from get_roleplay_session because it reads *completed* sessions —
+    that one filters on status='active' so a resume can't reopen a graded
+    scene. Returns the transcript even when grading failed: an ungraded
+    transcript is still worth reading back.
+    """
+    user_id = _lookup_user_id(external_id)
+    if not user_id:
+        return None
+
+    with cursor() as cur:
+        cur.execute(
+            "SELECT transcript, rubric_result FROM tutor_sessions"
+            " WHERE id = %s AND user_id = %s AND mode = 'roleplay'",
+            (session_id, user_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+
+    result = row.get("rubric_result") or {}
+    return {
+        "score": result.get("score"),
+        "met_count": result.get("met_count"),
+        "total": result.get("total"),
+        "criteria": result.get("criteria") or [],
+        "summary": result.get("summary"),
+        "message": result.get("message"),
+        "graded": bool(result.get("graded")),
+        "transcript": row.get("transcript") or [],
+    }
+
+
+def save_roleplay_session(session_id: str, session: Dict) -> None:
+    """Write mutable roleplay state back after a completed turn.
+
+    Called once per turn, never per audio chunk — the transcript only changes
+    when a turn closes.
+    """
+    assignments = ", ".join(f"{field} = %s" for field in _ROLEPLAY_STATE_FIELDS)
+    with cursor() as cur:
+        cur.execute(
+            f"UPDATE tutor_sessions SET {assignments}, updated_at = now()"
+            f" WHERE id = %s",
+            (
+                *[_roleplay_state_param(f, session.get(f)) for f in _ROLEPLAY_STATE_FIELDS],
+                session_id,
+            ),
+        )
+
+
+def complete_roleplay_session(session_id: str, session: Dict) -> None:
+    """Mark the scene completed and record it as a quiz attempt."""
+    turns = session.get("turns_taken") or 0
+    # Resolved before the transaction: get_or_create_user checks out its own
+    # connection, and nesting a second checkout inside an open transaction can
+    # deadlock a small pool. complete_tutor_session does the same.
+    user_id = get_or_create_user(session["user_id"]) if turns else None
+
+    _complete_roleplay_session_tx(session_id, session, turns, user_id)
+
+
+@retry_on_serialization_failure
+def _complete_roleplay_session_tx(session_id: str, session: Dict, turns: int,
+                                  user_id: Optional[str]) -> None:
+    """Mark completed and record the attempt, atomically.
+
+    Writes the quiz_attempts row and **no question_attempts rows at all.**
+    That is deliberate, and it is also the fix for a real crash: the tutor's
+    executemany at the top of this section subscripts e["question_text"],
+    e["user_answer"], e["correct_answer"], e["is_correct"] and
+    e["question_index"] on every history entry. A roleplay transcript entry has
+    none of those keys, so reusing that path raises KeyError.
+
+    Fabricating per-question rows out of conversation turns would be worse than
+    the crash: /me/analytics and the recent-attempts sidebar both read
+    question_attempts as graded questions, and a spoken turn is not one. The
+    scene's real result lives in rubric_result.
+    """
+    assignments = ", ".join(f"{field} = %s" for field in _ROLEPLAY_STATE_FIELDS)
+
+    with transaction() as cur:
+        cur.execute(
+            f"UPDATE tutor_sessions SET status = 'completed', {assignments},"
+            f" updated_at = now() WHERE id = %s",
+            (
+                *[_roleplay_state_param(f, session.get(f)) for f in _ROLEPLAY_STATE_FIELDS],
+                session_id,
+            ),
+        )
+
+        if not turns:
+            return
+
+        # An ungraded scene (grading failed, or too few turns to grade) still
+        # completes, but contributes no score — None reads as "attempted, not
+        # scored" rather than as a zero the student didn't earn.
+        result = session.get("rubric_result") or {}
+        score = result.get("score")
+        criteria = result.get("criteria") or []
+
+        cur.execute(
+            "INSERT INTO quiz_attempts"
+            " (user_id, subject_id, subject, difficulty, total_questions, score)"
+            " VALUES (%s, NULL, %s, 'roleplay', %s, %s)",
+            (user_id, session["subject"], len(criteria), score),
+        )
+
+
 # --- Spaced repetition for flashcards (ROADMAP 4.1) ---------------------------
 # SM-2-style scheduling: each card carries (interval_days, ease, repetitions,
 # due_at), updated by self-graded reviews. "again" resets the card into a

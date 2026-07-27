@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends, Query, Header
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends, Query, Header, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, RedirectResponse
 import asyncio
@@ -15,10 +15,12 @@ from pptx import Presentation
 from dotenv import load_dotenv
 
 from .ai_service import BloomAI
-from .models import SummaryRequest, QuizRequest, QuizResponse, SummaryResponse, FlashcardRequest, FlashcardResponse, AnswerCheckRequest, AnswerCheckResponse, AttemptBreakdownResponse, UserStatsResponse, UserAnalyticsResponse, AttemptRecapResponse, RecentAttempt, Subject, CreateSubjectRequest, TutorStartRequest, TutorStartResponse, TutorAnswerRequest, TutorAnswerResponse, TutorWrapRequest, TutorWrapResponse, DocumentInfo, DocumentContent, DueFlashcard, DueFlashcardsResponse, FlashcardReviewRequest, FlashcardReviewResponse, PretestStartRequest, PretestStartResponse, PretestSubmitRequest, PretestSubmitResponse, DueConceptReviewsResponse, PodcastSegment, PodcastResponse, PodcastInfo, DocumentOriginalMeta
+from .models import SummaryRequest, QuizRequest, QuizResponse, SummaryResponse, FlashcardRequest, FlashcardResponse, AnswerCheckRequest, AnswerCheckResponse, AttemptBreakdownResponse, UserStatsResponse, UserAnalyticsResponse, AttemptRecapResponse, RecentAttempt, Subject, CreateSubjectRequest, TutorStartRequest, TutorStartResponse, TutorAnswerRequest, TutorAnswerResponse, TutorWrapRequest, TutorWrapResponse, DocumentInfo, DocumentContent, DueFlashcard, DueFlashcardsResponse, FlashcardReviewRequest, FlashcardReviewResponse, PretestStartRequest, PretestStartResponse, PretestSubmitRequest, PretestSubmitResponse, DueConceptReviewsResponse, PodcastSegment, PodcastResponse, PodcastInfo, DocumentOriginalMeta, RoleplayStartRequest, RoleplayStartResponse, RoleplayEndRequest, RoleplayResultResponse
 from . import extraction_agent
 from . import url_ingest
 from . import tutor_agent
+from . import roleplay_agent
+from . import stt_service
 from . import pretest_agent
 from . import memory_service
 from . import db
@@ -735,6 +737,474 @@ async def tutor_get_session(session_id: str, user_id: str = Depends(auth.get_cur
     if state is None:
         raise HTTPException(status_code=404, detail="Tutor session not found or already finished")
     return TutorStartResponse(**state)
+
+# --- Voice roleplay (ROADMAP_HONEN 4) ---
+#
+# The session is created over plain HTTP first, then a websocket attaches to
+# it. Scenario generation is a 10-30s LLM pipeline that wants the existing
+# progress-polling UX, and doing it inside the socket handshake would mean a
+# half-minute of silence on a connection the client can't show progress for.
+
+# How long the client has to send its auth frame before the socket is closed.
+# Short on purpose: an unauthenticated socket costs a connection slot, and a
+# real client sends this frame immediately.
+WS_AUTH_TIMEOUT_SECONDS = 5
+
+# Close codes. 4401/4404 mirror HTTP 401/404 in the application range, since
+# the WS close frame is the only channel available once the socket is open.
+WS_CLOSE_UNAUTHORIZED = 4401
+WS_CLOSE_NOT_FOUND = 4404
+
+
+@app.post("/roleplay/start", response_model=RoleplayStartResponse)
+async def roleplay_start(request: RoleplayStartRequest, user_id: str = Depends(auth.get_current_user_id)):
+    """Generate a grounded scene and open a roleplay session.
+
+    Refuses at the door when STT is unconfigured. This is deliberately NOT the
+    /generate-podcast independent-failure pattern: TTS degrades to captions and
+    the scene still works, but STT is the *input* channel — without it there is
+    no scene, only a character talking to nobody. Checking before the LLM runs
+    means a missing key costs nothing rather than surfacing after 30 seconds of
+    scenario generation.
+    """
+    if not stt_service.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Voice roleplay isn't set up on this server (DEEPGRAM_API_KEY is missing).",
+        )
+
+    try:
+        if request.documents:
+            sources = [
+                {
+                    "text_content": doc.text_content,
+                    "filename": doc.filename,
+                    "document_id": doc.document_id,
+                }
+                for doc in request.documents
+                if doc.text_content and doc.text_content.strip()
+            ]
+        elif request.text_content.strip():
+            sources = [{
+                "text_content": request.text_content,
+                "filename": request.subject,
+                "document_id": request.document_id,
+            }]
+        else:
+            sources = []
+        if not sources:
+            raise HTTPException(
+                status_code=400,
+                detail="provide documents[] or text_content with material to study",
+            )
+
+        result = await roleplay_agent.start_session(
+            user_id, sources, request.subject, ai_service,
+            concept=request.concept,
+            progress=progress.reporter(request.progress_id),
+        )
+        return RoleplayStartResponse(**result)
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Fatal, not degraded: a canned fallback scene would be ungrounded,
+        # and an ungrounded scene defeats the premise of the feature.
+        raise HTTPException(status_code=500, detail=f"Error starting roleplay session: {str(e)}")
+    finally:
+        progress.clear(request.progress_id)
+
+
+@app.post("/roleplay/end", response_model=RoleplayResultResponse)
+async def roleplay_end(request: RoleplayEndRequest, user_id: str = Depends(auth.get_current_user_id)):
+    """Grade the scene and complete the session.
+
+    Over plain HTTP rather than the socket so a dead connection never costs the
+    student their result — this is the path the client falls back to when the
+    websocket drops mid-scene.
+    """
+    session = roleplay_agent._load_session(request.session_id, user_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Roleplay session not found or already finished")
+
+    try:
+        result = await roleplay_agent.grade_session(request.session_id, session, ai_service)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error grading roleplay session: {str(e)}")
+    return RoleplayResultResponse(**result)
+
+
+@app.get("/roleplay/{session_id}/result", response_model=RoleplayResultResponse)
+async def roleplay_result(session_id: str, user_id: str = Depends(auth.get_current_user_id)):
+    """A finished scene's rubric result and transcript."""
+    result = await asyncio.to_thread(db.get_roleplay_result, session_id, user_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Roleplay result not found")
+    return RoleplayResultResponse(**result)
+
+
+async def _ws_send(websocket: WebSocket, payload: dict) -> bool:
+    """Send one JSON control frame. False if the client is gone.
+
+    Every send goes through here: with no test suite, a client closing
+    mid-turn is the likeliest source of log noise, and an unguarded send in
+    the middle of a turn would take down the whole handler.
+    """
+    try:
+        await websocket.send_json(payload)
+        return True
+    except (WebSocketDisconnect, RuntimeError):
+        return False
+
+
+# Binary frame size for the MP3 down-channel. Small enough that a barge-in
+# lands within a frame or two, large enough that a 100KB clip isn't hundreds of
+# sends.
+WS_AUDIO_CHUNK_BYTES = 16 * 1024
+
+
+async def _stream_turn_audio(websocket: WebSocket, live: dict, turn: dict) -> None:
+    """Synthesize one reply and ship it as binary frames, then audio_end.
+
+    Degrades per-channel, following /generate-podcast: a synthesis failure
+    still sends `audio_end` so the client's turn state advances and the line
+    stands as text. `notice{degraded:true}` is sent **once** per session — a
+    broken key would otherwise add a stall and a toast to every single turn.
+    """
+    turn_id = turn["turn_id"]
+
+    async def _finish(degraded_message: Optional[str] = None) -> None:
+        if degraded_message and not live["tts_degraded"]:
+            live["tts_degraded"] = True
+            await _ws_send(websocket, {
+                "type": "notice", "code": "tts_degraded",
+                "message": degraded_message, "degraded": True,
+            })
+        # Always sent, even with zero audio frames: the client keys "the
+        # character has finished speaking" off this frame, so skipping it on
+        # the degraded path would strand the UI mid-turn forever.
+        await _ws_send(websocket, {"type": "audio_end", "turn_id": turn_id})
+
+    if live["tts_degraded"] or not tts_service.is_configured():
+        await _finish(
+            None if live["tts_degraded"] else
+            "Audio isn't set up on this server, so the character's lines will "
+            "appear as text."
+        )
+        return
+
+    task = asyncio.create_task(
+        tts_service.synthesize_turn(turn["reply"], client=ai_service._client)
+    )
+    live["tts_task"] = task
+
+    try:
+        audio = await task
+    except asyncio.CancelledError:
+        # Barge-in: the student started talking over this line. Abandon it
+        # quietly — the client already dropped the buffer.
+        await _ws_send(websocket, {"type": "audio_end", "turn_id": turn_id})
+        return
+    except tts_service.TTSError as e:
+        await _finish(e.user_message)
+        return
+    except Exception as e:
+        await _finish(f"Audio synthesis failed: {e}")
+        return
+    finally:
+        live["tts_task"] = None
+
+    for start in range(0, len(audio), WS_AUDIO_CHUNK_BYTES):
+        # A turn that's been superseded by a barge-in stops shipping frames.
+        if live["current_turn_id"] != turn_id:
+            break
+        try:
+            await websocket.send_bytes(audio[start:start + WS_AUDIO_CHUNK_BYTES])
+        except (WebSocketDisconnect, RuntimeError):
+            return
+
+    await _finish()
+
+
+@app.websocket("/roleplay/live/{session_id}")
+async def roleplay_live(websocket: WebSocket, session_id: str):
+    """The live roleplay channel — the first websocket in this codebase.
+
+    Framing rule: binary frames are always audio, text frames are always JSON
+    control. Direction disambiguates the two binary formats (PCM up, MP3 down),
+    so nothing is base64'd.
+
+    Auth is a first-frame protocol rather than a query parameter: a token in
+    the URL lands in uvicorn's access logs and the browser's history, and a WS
+    URL is not treated as a secret by anything that handles it.
+    """
+    await websocket.accept()
+
+    # Authentication and ownership are separate checks with separate codes.
+    # A foreign session is 4404, not 4403 — indistinguishable from one that
+    # doesn't exist, matching the rule the HTTP loaders follow.
+    try:
+        opening = await asyncio.wait_for(
+            websocket.receive_json(), timeout=WS_AUTH_TIMEOUT_SECONDS,
+        )
+    except (asyncio.TimeoutError, WebSocketDisconnect, ValueError):
+        await websocket.close(code=WS_CLOSE_UNAUTHORIZED)
+        return
+
+    if not isinstance(opening, dict) or opening.get("type") != "auth":
+        await websocket.close(code=WS_CLOSE_UNAUTHORIZED)
+        return
+
+    user_id = await auth.verify_bearer_token(str(opening.get("token") or ""))
+    if not user_id:
+        await websocket.close(code=WS_CLOSE_UNAUTHORIZED)
+        return
+
+    session = roleplay_agent._load_session(session_id, user_id)
+    if session is None:
+        await websocket.close(code=WS_CLOSE_NOT_FOUND)
+        return
+
+    live = session["live"]
+    live["websocket"] = websocket
+    persisted = session["persisted"]
+
+    # current_turn_id resumes from the transcript rather than restarting at 0:
+    # a reconnect mid-scene must not reuse turn ids the client has already
+    # seen, or its "discard frames from a stale turn" rule discards live ones.
+    live["current_turn_id"] = max(
+        (turn.get("turn_id", 0) for turn in persisted["transcript"]), default=0,
+    )
+
+    await _ws_send(websocket, {
+        "type": "ready",
+        "scenario": roleplay_agent.public_scenario(persisted["scenario"]),
+        "transcript": persisted["transcript"],
+        "turns_taken": persisted["turns_taken"],
+    })
+
+    # The scene's turn queue. The socket reader and the Flux pump both feed it,
+    # so a spoken turn and a typed one land on exactly the same code path
+    # below — the transport is the only thing that differs.
+    utterances: asyncio.Queue = asyncio.Queue()
+    flux_task: Optional[asyncio.Task] = None
+
+    async def _pump_flux() -> None:
+        """Translate Flux turn events onto the wire protocol.
+
+        Flux carries end-of-turn detection itself, so this is a mapping, not a
+        turn-taking algorithm: EndOfTurn arrives with the final transcript
+        already attached, which is why there is no separate final-pass request.
+        """
+        flux = live.get("flux")
+        if flux is None:
+            return
+        try:
+            async for event in flux.events():
+                name = event.get("event")
+                turn_index = event.get("turn_index", 0)
+
+                if name == "Error":
+                    if not live["stt_degraded"]:
+                        live["stt_degraded"] = True
+                        await _ws_send(websocket, {
+                            "type": "notice", "code": "stt_unavailable",
+                            "message": (
+                                "We lost the speech service. You can keep going "
+                                "by typing instead."
+                            ),
+                            "degraded": True,
+                        })
+                    continue
+
+                if name in ("Update", "TurnResumed"):
+                    # Advisory. `transcript` is the whole turn so far, not a
+                    # delta, which is why the client replaces rather than
+                    # appends. TurnResumed means Flux withdrew a draft
+                    # end-of-turn, so the same non-final frame reverts it.
+                    await _ws_send(websocket, {
+                        "type": "transcript", "text": event.get("transcript", ""),
+                        "final": False, "turn_id": turn_index,
+                    })
+                elif name == "EndOfTurn":
+                    text = (event.get("transcript") or "").strip()
+                    await _ws_send(websocket, {
+                        "type": "transcript", "text": text,
+                        "final": True, "turn_id": turn_index,
+                    })
+                    # An empty EndOfTurn is silence Flux mistook for speech.
+                    # Running a turn on "" produces a confused reply to
+                    # nothing, so drop it rather than invent a transcript.
+                    if text:
+                        await utterances.put(text)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("roleplay: flux pump ended for %s", session_id, exc_info=True)
+
+    async def _read_socket() -> None:
+        """Route inbound frames: binary is audio, text is JSON control."""
+        nonlocal flux_task
+        while True:
+            try:
+                raw = await websocket.receive()
+            except (WebSocketDisconnect, RuntimeError):
+                await utterances.put(None)
+                return
+
+            if raw.get("type") == "websocket.disconnect":
+                await utterances.put(None)
+                return
+
+            # Binary: 80ms of 16kHz mono PCM, straight upstream.
+            audio = raw.get("bytes")
+            if audio is not None:
+                # Server-side gate as well as the client's. The client already
+                # drops frames while muted, but a stale or buggy client would
+                # otherwise bill us for uploaded silence — and Flux charges for
+                # streamed audio whether anyone is talking or not.
+                if live["stt_degraded"] or not live["mic_open"]:
+                    continue
+                flux = live.get("flux")
+                if flux is None:
+                    flux = stt_service.FluxSession(
+                        keyterms=(persisted["scenario"] or {}).get("grounding_concepts")
+                    )
+                    live["flux"] = flux
+                    flux_task = asyncio.create_task(_pump_flux())
+                try:
+                    await flux.send_audio(audio)
+                except stt_service.STTError as e:
+                    if not live["stt_degraded"]:
+                        live["stt_degraded"] = True
+                        await _ws_send(websocket, {
+                            "type": "notice", "code": e.code,
+                            "message": e.user_message, "degraded": True,
+                        })
+                continue
+
+            text_frame = raw.get("text")
+            if text_frame is None:
+                continue
+            try:
+                message = json.loads(text_frame)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(message, dict):
+                continue
+
+            kind = message.get("type")
+
+            if kind == "end_session":
+                await utterances.put(None)
+                return
+
+            if kind == "barge_in":
+                # Bump the turn id so any in-flight frame loop stops, and
+                # cancel the synthesis task. The client has already called
+                # source.stop() and dropped its buffer — because a turn is
+                # decoded only at audio_end, there's no decoder state to
+                # unwind, just a byte buffer to discard.
+                live["current_turn_id"] += 1
+                task = live.get("tts_task")
+                if task is not None and not task.done():
+                    task.cancel()
+                continue
+
+            if kind == "utterance":
+                text = str(message.get("text") or "").strip()
+                if text:
+                    await utterances.put(text)
+                continue
+
+            # mic_open / mic_close are "start/stop sending frames upstream" —
+            # a mute button and the push-to-talk gate, NOT utterance
+            # boundaries. Flux owns endpointing and keeps its socket across
+            # both; only end_session sends CloseStream. Closing the mic
+            # deliberately does not close the upstream socket: that would
+            # discard the conversational state Flux's end-of-turn model
+            # carries, which is the whole reason the socket is per-session.
+            if kind in ("mic_open", "mic_close"):
+                live["mic_open"] = kind == "mic_open"
+
+    reader_task = asyncio.create_task(_read_socket())
+
+    try:
+        while True:
+            text = await utterances.get()
+            if text is None:
+                break
+
+            if not await _ws_send(websocket, {
+                "type": "thinking", "turn_id": live["current_turn_id"] + 1,
+            }):
+                break
+
+            try:
+                turn = await roleplay_agent.handle_utterance(
+                    session_id, session, text, ai_service,
+                )
+            except Exception as e:
+                logger.warning("roleplay: turn failed for %s", session_id, exc_info=True)
+                await _ws_send(websocket, {
+                    "type": "notice", "code": "turn_failed",
+                    "message": "That turn didn't go through. Try saying it again.",
+                    "degraded": False,
+                })
+                continue
+
+            # reply_text must precede its audio, and audio_end must follow it.
+            # The client keys its turn state off that ordering.
+            if not await _ws_send(websocket, {
+                "type": "reply_text", "text": turn["reply"], "turn_id": turn["turn_id"],
+            }):
+                break
+
+            await _stream_turn_audio(websocket, live, turn)
+
+            if turn["nudge"]:
+                await _ws_send(websocket, {
+                    "type": "notice", "code": "soft_nudge",
+                    "message": "You've covered a lot here — wrap up whenever you're ready.",
+                    "degraded": False,
+                })
+
+            if turn["done"]:
+                break
+
+        # Grading runs on the way out so a client that closes cleanly still
+        # gets its result over the socket. A client that vanishes instead
+        # reaches the same result through POST /roleplay/end.
+        result = await roleplay_agent.grade_session(session_id, session, ai_service)
+        await _ws_send(websocket, {"type": "graded", "result": result})
+    except Exception:
+        logger.warning("roleplay: socket handler failed for %s", session_id, exc_info=True)
+        await _ws_send(websocket, {
+            "type": "error", "code": "internal",
+            "message": "Something went wrong with this scene.",
+        })
+    finally:
+        live["websocket"] = None
+
+        # Close the upstream Flux socket before anything else: it is the one
+        # resource here that costs money while it stays open.
+        flux = live.get("flux")
+        live["flux"] = None
+        if flux is not None:
+            try:
+                await flux.close()
+            except Exception:
+                pass
+
+        for task in (reader_task, flux_task, live.get("tts_task")):
+            if task is not None and not task.done():
+                task.cancel()
+        live["tts_task"] = None
+
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
 
 # --- Documents library (ROADMAP 3.1): the memory layer's stored uploads,
 # --- made user-visible so material can be re-studied without re-uploading.

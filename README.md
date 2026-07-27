@@ -184,7 +184,17 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
 ```
 
-Apply the SQL in `backend/sql/` to your Supabase project (in the SQL editor), in order: `schema.sql`, then the `migrate_*.sql` files. `migrate_memory_layer.sql` enables the pgvector extension and creates the document memory tables.
+Apply the SQL in `backend/sql/cockroach/` in numeric order:
+
+| File | Adds |
+|---|---|
+| `001_schema.sql` | Every table, index, and UDF (collapsed final state) |
+| `002_vector_indexes.sql` | The two vector indexes — separate so a bulk load can precede them |
+| `003_podcasts.sql` | Podcast episodes and segment offsets |
+| `004_document_originals.sql` | `documents.source_key` / `source_content_type` |
+| `005_roleplay.sql` | Roleplay state columns on `tutor_sessions` |
+
+Each file is idempotent (`IF NOT EXISTS` throughout), so re-applying is safe. `backend/sql/` (unnumbered) is the pre-CockroachDB Supabase history and is no longer applied.
 
 Run the API:
 

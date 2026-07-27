@@ -15,6 +15,7 @@ import {
   SimilarDocument,
   TutorSource,
   TutorStartResponse,
+  RoleplayStartResponse,
   PretestStartResponse,
   StudyOutput,
   PodcastResponse,
@@ -25,6 +26,7 @@ import { LessonView } from '@/components/study/LessonView'
 import { GenerationProgress, OutputProgress } from '@/components/study/GenerationProgress'
 import { Attachment } from '@/components/study/StudyBar'
 import { TutorView } from '@/components/study/TutorView'
+import { RoleplayView } from '@/components/study/roleplay/RoleplayView'
 import { PretestView } from '@/components/study/PretestView'
 
 interface BloomAppProps {
@@ -136,8 +138,11 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
   const [podcast, setPodcast] = useState<PodcastResponse | null>(null)
   const [quizResult, setQuizResult] = useState<QuizResult | null>(null)
   const [userAnswers, setUserAnswers] = useState<UserAnswer[]>([])
-  const [currentStep, setCurrentStep] = useState<'upload' | 'tutor' | 'pretest' | 'lesson'>(initialStep)
+  const [currentStep, setCurrentStep] = useState<'upload' | 'tutor' | 'pretest' | 'lesson' | 'roleplay'>(initialStep)
   const [tutorSession, setTutorSession] = useState<TutorStartResponse | null>(null)
+  // Voice roleplay (ROADMAP_HONEN 4): the active scene. Created over HTTP;
+  // the conversation itself runs on the websocket RoleplayView opens.
+  const [roleplaySession, setRoleplaySession] = useState<RoleplayStartResponse | null>(null)
   // Pretesting: the active pretest and, after grading, the missed concepts
   // to emphasize during generation and flag in the summary view.
   const [pretest, setPretest] = useState<PretestStartResponse | null>(null)
@@ -517,6 +522,37 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
 
   handleStartTutorRef.current = handleStartTutor
 
+  // Voice roleplay (ROADMAP_HONEN 4). Scenario generation is a 10-30s LLM
+  // pipeline, so it uses the same progress-polling UX as the tutor start; the
+  // websocket only attaches once the session exists.
+  const handleStartRoleplay = useCallback(async () => {
+    if (!textContent || !formData.subjectName) return
+
+    setLoading(true)
+    setError('')
+
+    const progressId = crypto.randomUUID()
+    const stopPolling = pollProgress(progressId)
+    try {
+      const session = await api.startRoleplay(
+        formData.subjectName,
+        sources.length > 0
+          ? sources
+          : [{ text_content: textContent, filename: formData.subjectName, document_id: documentId }],
+        undefined,
+        progressId,
+        documentId
+      )
+      setRoleplaySession(session)
+      setCurrentStep('roleplay')
+    } catch (err) {
+      setError(err instanceof APIError ? err.message : 'Failed to start roleplay')
+    } finally {
+      stopPolling()
+      setLoading(false)
+    }
+  }, [textContent, formData, pollProgress, documentId, sources])
+
   // Pretesting: a short quiz before any summary is shown. Grading writes
   // into the persistent concept mastery server-side, so tutor sessions
   // started afterwards begin calibrated instead of at the 0.5 midpoint.
@@ -694,6 +730,28 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
         />
       </main>
     )
+  } else if (currentStep === 'roleplay' && roleplaySession) {
+    return (
+      <main className="relative z-10 max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+        <div className="text-center mb-10">
+          <h1 className="font-serif text-4xl sm:text-5xl font-light text-white mb-4">
+            Explain it <span className="italic text-[#D7FF3D]">out loud</span>
+          </h1>
+          <p className="text-lg text-white/60 font-sans font-light">
+            {formData.subjectName} — talk someone through it, and find out what you actually know
+          </p>
+        </div>
+        <RoleplayView
+          key={roleplaySession.session_id}
+          session={roleplaySession}
+          onExit={() => {
+            setRoleplaySession(null)
+            setCurrentStep('upload')
+          }}
+          onPracticeAgain={() => handleStartRoleplay()}
+        />
+      </main>
+    )
   } else if (currentStep === 'tutor' && tutorSession) {
     return (
       <main className="relative z-10 max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
@@ -762,6 +820,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
         loading={loading}
         outputs={formData.outputs}
         onStartTutor={handleStartTutor}
+        onStartRoleplay={handleStartRoleplay}
         setCurrentStep={setCurrentStep}
         resetApp={resetApp}
       />

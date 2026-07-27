@@ -49,6 +49,9 @@ interface LessonViewProps {
   // no artifact and so gets no tab.
   outputs: StudyOutput[]
   onStartTutor: () => void
+  // Voice roleplay (ROADMAP_HONEN 4). Optional so the lesson renders
+  // unchanged wherever the scene isn't offered.
+  onStartRoleplay?: () => void
   setCurrentStep: (step: 'upload' | 'tutor' | 'lesson') => void
   resetApp: () => void
 }
@@ -70,6 +73,7 @@ export function LessonView({
   loading,
   outputs,
   onStartTutor,
+  onStartRoleplay,
   setCurrentStep,
   resetApp
 }: LessonViewProps) {
@@ -230,13 +234,25 @@ export function LessonView({
                 Ready to be quizzed on this properly?
               </p>
             </div>
-            <Button
-              onClick={onStartTutor}
-              disabled={loading}
-              className={`${LIME_BG} text-black hover:bg-[#c2e836] shrink-0`}
-            >
-              Start tutor session
-            </Button>
+            <div className="flex items-center gap-2 shrink-0">
+              {onStartRoleplay && (
+                <Button
+                  onClick={onStartRoleplay}
+                  disabled={loading}
+                  variant="outline"
+                  className="border-white/20 text-white/80 hover:bg-white/[0.06]"
+                >
+                  Explain it out loud
+                </Button>
+              )}
+              <Button
+                onClick={onStartTutor}
+                disabled={loading}
+                className={`${LIME_BG} text-black hover:bg-[#c2e836]`}
+              >
+                Start tutor session
+              </Button>
+            </div>
           </div>
         </div>
       )}

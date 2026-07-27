@@ -317,6 +317,79 @@ class TutorWrapRequest(BaseModel):
 class TutorWrapResponse(BaseModel):
     summary: TutorSessionSummary
 
+# --- Voice roleplay (ROADMAP_HONEN 4) ---
+
+class RoleplayStartRequest(BaseModel):
+    # Same material shape as TutorStartRequest: `documents` is the general
+    # form, text_content the one-file shorthand, collapsed in the route.
+    documents: Optional[List[TutorSource]] = None
+    text_content: str = ""
+    subject: str
+    # Which concept the scene should exercise. When omitted, the memory layer
+    # picks the student's weakest matching concept.
+    concept: Optional[str] = None
+    document_id: Optional[str] = None
+    progress_id: Optional[str] = None
+
+class RoleplayCriterion(BaseModel):
+    # The rubric as the student may see it: names only. Each criterion's
+    # `evidence` — the source fact that makes it checkable — stays server-side.
+    id: str
+    name: str
+
+class RoleplayCharacter(BaseModel):
+    name: str
+    role: str
+
+class RoleplayScenarioPublic(BaseModel):
+    title: Optional[str] = None
+    character: Optional[RoleplayCharacter] = None
+    situation: Optional[str] = None
+    student_role: Optional[str] = None
+    opening_line: Optional[str] = None
+    # Shown up front, before the scene starts. Deliberate pedagogy: knowing
+    # what a good explanation covers is the point, not a leak.
+    rubric: List[RoleplayCriterion] = []
+
+class RoleplayStartResponse(BaseModel):
+    session_id: str
+    scenario: RoleplayScenarioPublic
+    opening_line: Optional[str] = None
+    # Domain vocabulary the student is likely to say aloud, passed to the STT
+    # socket as keyterms so it doesn't mangle exactly the words that matter.
+    grounding_concepts: List[str] = []
+
+class RoleplayTranscriptTurn(BaseModel):
+    role: str  # "student" | "character"
+    text: str
+    turn_id: int
+
+class RoleplayGradedCriterion(BaseModel):
+    id: str
+    name: str
+    met: bool
+    # The student's own words showing they met it. Never null when met is
+    # true — grade_roleplay downgrades a quoteless met to unmet.
+    evidence_quote: Optional[str] = None
+    feedback: Optional[str] = None
+
+class RoleplayResultResponse(BaseModel):
+    # None when the scene couldn't be graded — an honest null, never a zero
+    # the student didn't earn and never an all-met result they didn't earn.
+    score: Optional[float] = None
+    met_count: Optional[int] = None
+    total: Optional[int] = None
+    criteria: List[RoleplayGradedCriterion] = []
+    summary: Optional[str] = None
+    # Set only when graded is false: why there's no score, in plain language.
+    message: Optional[str] = None
+    graded: bool = False
+    # Always present, graded or not — the transcript is worth having on its own.
+    transcript: List[RoleplayTranscriptTurn] = []
+
+class RoleplayEndRequest(BaseModel):
+    session_id: str
+
 # --- Spaced repetition for concepts (ROADMAP_LEARNING 6) ---
 
 class DueConceptReview(BaseModel):
