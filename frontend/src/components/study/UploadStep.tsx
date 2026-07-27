@@ -14,12 +14,16 @@ interface UploadStepProps {
   formData: StudyFormData
   setFormData: React.Dispatch<React.SetStateAction<StudyFormData>>
   attachments: Attachment[]
-  onAttachFile: (file: File) => Promise<void>
-  onAttachUrl: (url: string) => Promise<void>
+  // Ingestion is fire-and-forget — these return as soon as the job is queued,
+  // and progress lands on the source's own chip.
+  onAttachFile: (file: File) => void
+  onAttachUrl: (url: string) => void
   onAttachDocument: (documentId: string) => Promise<void>
   onRemoveAttachment: (documentId: string) => void
   onStart: () => void
   loading: boolean
+  // A submit waiting on sources that are still ingesting.
+  queuedSubmit?: boolean
   error: string
   // Live stage of the extraction pipeline ("Describing diagrams and
   // figures (4 of 12 pages)") — replaces the frozen "Processing file..." text.
@@ -40,6 +44,7 @@ export function UploadStep({
   onRemoveAttachment,
   onStart,
   loading,
+  queuedSubmit,
   error,
   progressStage,
   resetApp
@@ -102,6 +107,7 @@ export function UploadStep({
           onRemoveAttachment={onRemoveAttachment}
           onStart={onStart}
           loading={loading}
+          queuedSubmit={queuedSubmit}
           progressStage={progressStage}
           error={error}
         />

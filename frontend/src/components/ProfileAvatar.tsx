@@ -29,7 +29,18 @@ export function ProfileAvatar() {
   }, [menuOpen])
 
   const displayName = user?.user_metadata?.full_name || user?.email || 'Profile'
-  const avatarUrl = user?.user_metadata?.avatar_url as string | undefined
+  const rawAvatarUrl = user?.user_metadata?.avatar_url as string | undefined
+  // Google's avatar host (lh3.googleusercontent.com) intermittently refuses
+  // these requests — rate limiting, and referrer checks on some accounts. When
+  // that happens the image element is left broken, which is louder and uglier
+  // than simply showing the initial. So a failure falls back to the same
+  // placeholder used when there's no avatar at all.
+  //
+  // Storing the URL that failed rather than a boolean means a new one is
+  // retried automatically — signing in as someone else doesn't inherit the
+  // previous account's failure, and it needs no reset effect.
+  const [failedUrl, setFailedUrl] = useState<string | null>(null)
+  const avatarUrl = rawAvatarUrl && rawAvatarUrl !== failedUrl ? rawAvatarUrl : undefined
 
   const handleSignOut = async () => {
     const supabase = createClient()
@@ -50,6 +61,9 @@ export function ProfileAvatar() {
           <img
             src={avatarUrl}
             alt={displayName}
+            onError={() => setFailedUrl(avatarUrl ?? null)}
+            // lh3 returns 403 for some accounts when a full referrer is sent.
+            referrerPolicy="no-referrer"
             className="h-8 w-8 rounded-full object-cover aspect-square"
           />
         ) : (

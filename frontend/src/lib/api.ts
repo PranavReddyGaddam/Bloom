@@ -61,7 +61,10 @@ export const api = {
     return response.json();
   },
 
-  async uploadPDF(file: File, progressId?: string): Promise<PDFUploadResponse> {
+  // `signal` only detaches the client from the request — the backend runs the
+  // extraction to completion regardless. Callers should say "Remove", not
+  // imply they stopped the work.
+  async uploadPDF(file: File, progressId?: string, signal?: AbortSignal): Promise<PDFUploadResponse> {
     const formData = new FormData();
     formData.append('file', file);
     if (progressId) {
@@ -72,6 +75,7 @@ export const api = {
       method: 'POST',
       headers: await authHeaders(),
       body: formData,
+      signal,
     });
 
     if (!response.ok) {
@@ -85,7 +89,7 @@ export const api = {
   // Ingest a YouTube video, direct media link, or article URL. Returns the
   // same shape as uploadPDF so callers reuse one path — a link becomes a
   // document like any other.
-  async ingestUrl(url: string, progressId?: string): Promise<PDFUploadResponse> {
+  async ingestUrl(url: string, progressId?: string, signal?: AbortSignal): Promise<PDFUploadResponse> {
     const response = await fetch(`${API_BASE_URL}/ingest-url`, {
       method: 'POST',
       headers: {
@@ -93,6 +97,7 @@ export const api = {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ url, progress_id: progressId }),
+      signal,
     });
 
     if (!response.ok) {

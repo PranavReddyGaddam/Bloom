@@ -37,7 +37,11 @@ export default function ProfilePage() {
   }, [])
 
   const displayName = user?.user_metadata?.full_name || user?.email || 'Student'
-  const avatarUrl = user?.user_metadata?.avatar_url as string | undefined
+  const rawAvatarUrl = user?.user_metadata?.avatar_url as string | undefined
+  // See ProfileAvatar: Google's avatar host fails intermittently, and a broken
+  // image element looks worse than the initial it falls back to.
+  const [failedAvatarUrl, setFailedAvatarUrl] = useState<string | null>(null)
+  const avatarUrl = rawAvatarUrl && rawAvatarUrl !== failedAvatarUrl ? rawAvatarUrl : undefined
 
   // Real trend: compare average score of the earlier half of attempts vs.
   // the more recent half — only meaningful with at least 4 attempts.
@@ -76,7 +80,13 @@ export default function ProfilePage() {
         {/* Identity */}
         <div className="flex items-center gap-4 mb-10">
           {avatarUrl ? (
-            <img src={avatarUrl} alt={displayName} className="h-16 w-16 rounded-full border border-white/15" />
+            <img
+              src={avatarUrl}
+              alt={displayName}
+              onError={() => setFailedAvatarUrl(avatarUrl ?? null)}
+              referrerPolicy="no-referrer"
+              className="h-16 w-16 rounded-full border border-white/15 object-cover aspect-square"
+            />
           ) : (
             <div className="h-16 w-16 rounded-full bg-white/10 border border-white/15 flex items-center justify-center text-2xl font-serif text-white">
               {displayName.charAt(0).toUpperCase()}

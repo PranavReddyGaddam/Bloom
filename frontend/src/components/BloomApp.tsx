@@ -3,6 +3,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { api, APIError } from '@/lib/api'
+import { ingestStore, usePendingRunningCount } from '@/lib/ingestStore'
 import {
   SummaryResponse,
   QuizResponse,
@@ -123,6 +124,11 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
   }, [])
 
   const [loading, setLoading] = useState(false)
+  // A submit clicked while sources were still ingesting. Kept separate from
+  // `loading` on purpose: reusing that flag would trip the full-screen
+  // "Building your lesson" branch during what is only an attachment.
+  const [queuedSubmit, setQueuedSubmit] = useState(false)
+  const pendingRunning = usePendingRunningCount()
   const [error, setError] = useState<string>('')
   const [summary, setSummary] = useState<SummaryResponse | null>(null)
   const [quiz, setQuiz] = useState<QuizResponse | null>(null)
@@ -154,12 +160,37 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     focusNote: ''
   })
 
+  // Documents the student has explicitly removed. Without this, the merge in
+  // rememberAttachments would treat a just-removed id as "arrived from the
+  // store" and put it straight back.
+  const removedIdsRef = useRef<Set<string>>(new Set())
+
   // Persist which documents are attached. Ids only — see the restore effect.
   // Declared before the effects that call it, not just before its other
   // callers: a `const` referenced above its definition is a runtime error.
+  //
+  // Removals are honored, but ids this component has never seen are kept: the
+  // ingest store appends directly to this key when a job resolves while
+  // BloomApp is unmounted, and a plain overwrite from stale `attachments`
+  // would silently erase that attachment.
   const rememberAttachments = useCallback((next: Attachment[]) => {
-    if (next.length === 0) localStorage.removeItem(STORED_FILE_KEY)
-    else localStorage.setItem(STORED_FILE_KEY, JSON.stringify(next.map(a => a.documentId)))
+    const ids = next.map(a => a.documentId)
+    let merged = ids
+    try {
+      const stored = localStorage.getItem(STORED_FILE_KEY)
+      const prev: unknown = stored ? JSON.parse(stored) : []
+      if (Array.isArray(prev)) {
+        // Anything already in state was reconciled by this render; anything
+        // else arrived from the store and has no in-memory counterpart yet.
+        const known = new Set(ids)
+        const extra = (prev as string[]).filter(id => typeof id === 'string' && !known.has(id))
+        merged = [...ids, ...extra.filter(id => !removedIdsRef.current.has(id))]
+      }
+    } catch {
+      // Unparseable — the current attachments are the better truth.
+    }
+    if (merged.length === 0) localStorage.removeItem(STORED_FILE_KEY)
+    else localStorage.setItem(STORED_FILE_KEY, JSON.stringify(merged))
   }, [])
 
   // Restore the attached material across page refreshes.
@@ -245,89 +276,66 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
     return () => { cancelled = true }
   }, [rememberAttachments])
 
-  // Upload a file and attach it. Extraction is the slow part, so this reports
-  // stage progress; it deliberately does not navigate — the student stays on
-  // the bar and keeps composing while material accumulates.
-  const handleAttachFile = useCallback(async (selectedFile: File) => {
+  // Ingestion runs in the module store, not here, so neither of these touches
+  // `loading` — that flag means "a generation/tutor/pretest/quiz operation is
+  // running" and nothing else. Attaching a source must never disable the bar.
+  //
+  // Both return immediately; the store reports per-source progress on its own
+  // chip and calls back through `onResolved` below.
+  const handleAttachFile = useCallback((selectedFile: File) => {
     const name = selectedFile.name.toLowerCase()
     if (!/\.(pdf|docx|pptx)$/.test(name)) {
       throw new Error('Supported file types are .pdf, .docx and .pptx')
     }
-
     setError('')
-    setLoading(true)
-
-    const progressId = crypto.randomUUID()
-    const stopPolling = pollProgress(progressId)
-    try {
-      const result = await api.uploadPDF(selectedFile, progressId)
-      if (!result.document_id) {
-        throw new Error('That file was processed but could not be saved')
-      }
-      const attachment: Attachment = {
-        documentId: result.document_id,
-        filename: result.filename || selectedFile.name,
-        textContent: result.text_content,
-      }
-      setAttachments(prev => {
-        const next = [...prev.filter(a => a.documentId !== attachment.documentId), attachment]
-        rememberAttachments(next)
-        return next
-      })
-      // Overlap warnings only make sense against a fresh upload.
-      setSimilarDocuments(result.similar_documents ?? [])
-    } finally {
-      stopPolling()
-      setLoading(false)
-    }
-  }, [pollProgress, rememberAttachments])
+    ingestStore.startFile(selectedFile)
+  }, [])
 
   // Attach a link (YouTube video, article, direct media). Deliberately the
   // same shape as handleAttachFile: ingestion produces a document, and from
   // there nothing downstream knows or cares that it came from a URL.
-  const handleAttachUrl = useCallback(async (url: string) => {
+  const handleAttachUrl = useCallback((url: string) => {
     const trimmed = url.trim()
     if (!trimmed) return
-
     setError('')
-    setLoading(true)
+    ingestStore.startUrl(trimmed)
+  }, [])
 
-    const progressId = crypto.randomUUID()
-    const stopPolling = pollProgress(progressId)
-    try {
-      const result = await api.ingestUrl(trimmed, progressId)
-      if (!result.document_id) {
-        throw new Error('That link was processed but could not be saved')
-      }
-      const attachment: Attachment = {
-        documentId: result.document_id,
-        filename: result.filename,
-        textContent: result.text_content,
-      }
-      setAttachments(prev => {
-        const next = [...prev.filter(a => a.documentId !== attachment.documentId), attachment]
-        rememberAttachments(next)
-        return next
-      })
-      setSimilarDocuments(result.similar_documents ?? [])
-      // A long lecture exceeds the extraction budget; say so plainly rather
-      // than letting the student study a silently shortened transcript.
-      if (result.truncated) {
-        setError(
-          `"${result.filename}" was long, so only the first part was kept. ` +
-          `Study material is generated from that portion.`
-        )
-      }
-    } finally {
-      stopPolling()
-      setLoading(false)
+  // Apply an ingest that finished while this component was mounted. The store
+  // has already persisted the document id, so an ingest that resolves while
+  // the student is on /review is picked up by the restore effect instead —
+  // only the overlap warning and truncation notice are lost in that case, and
+  // both describe a specific upload rather than the material itself.
+  useEffect(() => ingestStore.onResolved((r) => {
+    removedIdsRef.current.delete(r.documentId)
+    const attachment: Attachment = {
+      documentId: r.documentId,
+      filename: r.filename,
+      textContent: r.textContent,
     }
-  }, [pollProgress, rememberAttachments])
+    setAttachments(prev => {
+      const next = [...prev.filter(a => a.documentId !== attachment.documentId), attachment]
+      rememberAttachments(next)
+      return next
+    })
+    if (r.similarDocuments && r.similarDocuments.length > 0) {
+      setSimilarDocuments(r.similarDocuments)
+    }
+    // A long lecture exceeds the extraction budget; say so plainly rather
+    // than letting the student study a silently shortened transcript.
+    if (r.truncated) {
+      setError(
+        `"${r.filename}" was long, so only the first part was kept. ` +
+        `Study material is generated from that portion.`
+      )
+    }
+  }), [rememberAttachments])
 
   // Attach an existing library document — the same action as uploading, minus
   // the upload, so it lands in exactly the same place.
   const handleAttachDocument = useCallback(async (docId: string) => {
     setError('')
+    removedIdsRef.current.delete(docId)
     const content = await api.getDocumentContent(docId)
     setAttachments(prev => {
       if (prev.some(a => a.documentId === content.id)) return prev
@@ -342,6 +350,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
   }, [rememberAttachments])
 
   const handleRemoveAttachment = useCallback((docId: string) => {
+    removedIdsRef.current.add(docId)
     setAttachments(prev => {
       const next = prev.filter(a => a.documentId !== docId)
       rememberAttachments(next)
@@ -536,13 +545,41 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
   // when it's selected it runs first, and the rest of the selection generates
   // afterwards from the pretest's continue handler, carrying the missed
   // concepts through as emphasis.
-  const handleStart = useCallback(() => {
+  const dispatchStart = useCallback(() => {
     if (formData.outputs.includes('pretest')) {
       void handleStartPretest()
       return
     }
     void handleGenerate()
   }, [formData.outputs, handleStartPretest, handleGenerate])
+
+  const handleStart = useCallback(() => {
+    // Sources still ingesting: queue the run instead of blocking the button.
+    // Deliberately does NOT await here and then call handleGenerate — that
+    // captured closure's `textContent` would predate the resolutions, and its
+    // `if (!textContent) return` guard makes the button do nothing at all,
+    // with no error. The effect below re-reads from a fresh render instead.
+    if (pendingRunning > 0) {
+      setQueuedSubmit(true)
+      return
+    }
+    dispatchStart()
+  }, [pendingRunning, dispatchStart])
+
+  // Fire the queued run once nothing is still ingesting. `attachments` is in
+  // the dependency list so this waits for the resolved sources to actually be
+  // in state, not merely for the jobs to leave the store.
+  useEffect(() => {
+    if (!queuedSubmit || pendingRunning > 0) return
+    setQueuedSubmit(false)
+    if (attachments.length === 0) {
+      // Every queued source failed. Starting a generation with no material
+      // would produce nothing; the failed chips carry their own errors.
+      setError('Nothing was attached — those sources could not be added.')
+      return
+    }
+    dispatchStart()
+  }, [queuedSubmit, pendingRunning, attachments, dispatchStart])
 
   const handleSubmitPretest = useCallback(async (answers: string[]) => {
     if (!pretest) throw new APIError('No active pretest')
@@ -628,6 +665,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
         onRemoveAttachment={handleRemoveAttachment}
         onStart={handleStart}
         loading={loading}
+        queuedSubmit={queuedSubmit}
         error={error}
         progressStage={progressStage}
         resetApp={resetApp}
@@ -683,7 +721,7 @@ export default function BloomApp({ initialStep = 'upload' }: BloomAppProps) {
         />
       </main>
     )
-  } else if (loading) {
+  } else if (loading && currentStep === 'lesson') {
     // Fan-out in flight: a row per selected artifact, each advancing on its
     // own progress id. Artifacts that finish early are already in state and
     // appear the moment the whole batch settles.

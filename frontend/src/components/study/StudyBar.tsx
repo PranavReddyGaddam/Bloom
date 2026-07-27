@@ -2,9 +2,10 @@
 
 import { useRef, useState } from 'react'
 import {
-  ArrowUp, BookOpen, ChevronDown, ClipboardList, FileText, GraduationCap, Headphones,
+  AlertCircle, ArrowUp, BookOpen, ChevronDown, ClipboardList, FileText, GraduationCap, Headphones,
   Link as LinkIcon, Loader2, Paperclip, PencilLine, Sliders, Target, X,
 } from 'lucide-react'
+import { ingestStore, usePendingIngests } from '@/lib/ingestStore'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -50,11 +51,14 @@ interface StudyBarProps {
   formData: StudyFormData
   setFormData: React.Dispatch<React.SetStateAction<StudyFormData>>
   attachments: Attachment[]
-  onAttachFile: (file: File) => Promise<void>
-  onAttachUrl: (url: string) => Promise<void>
+  // Fire-and-forget: the ingest store owns the work, and each source reports
+  // on its own chip. Nothing here awaits an attachment.
+  onAttachFile: (file: File) => void
+  onAttachUrl: (url: string) => void
   onRemoveAttachment: (documentId: string) => void
   onStart: () => void
   loading: boolean
+  queuedSubmit?: boolean
   progressStage?: string
   error?: string
 }
@@ -74,11 +78,12 @@ export function StudyBar({
   onRemoveAttachment,
   onStart,
   loading,
+  queuedSubmit,
   progressStage,
   error,
 }: StudyBarProps) {
   const fileRef = useRef<HTMLInputElement>(null)
-  const [attaching, setAttaching] = useState(false)
+  const pending = usePendingIngests()
   const [attachError, setAttachError] = useState('')
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [dragging, setDragging] = useState(false)
@@ -87,48 +92,39 @@ export function StudyBar({
 
   const selected = (output: StudyOutput) => formData.outputs.includes(output)
 
-  const attachFiles = async (files: FileList | null) => {
+  // Every file gets a chip immediately; the store runs them through its own
+  // concurrency limiter, so this hands them all over at once rather than
+  // awaiting each in turn. The only error caught here is the synchronous
+  // file-type rejection — everything after that lands on the file's chip.
+  const attachFiles = (files: FileList | null) => {
     if (!files || files.length === 0) return
-    setAttaching(true)
     setAttachError('')
-    try {
-      // Sequential rather than parallel: extraction is heavy server-side and
-      // each upload reports its own progress, so a queue reads more honestly
-      // than several bars moving at once.
-      for (const file of Array.from(files)) {
-        await onAttachFile(file)
+    for (const file of Array.from(files)) {
+      try {
+        onAttachFile(file)
+      } catch (err) {
+        setAttachError(err instanceof Error ? err.message : 'Failed to add that file')
       }
-    } catch (err) {
-      setAttachError(err instanceof Error ? err.message : 'Failed to add that file')
-    } finally {
-      setAttaching(false)
     }
   }
 
   // A link takes the same route as a file: ingest, then it's an attachment.
-  // Video transcription can run for minutes, so this leans on the same
-  // progress reporting the upload path uses rather than a bare spinner.
-  const submitUrl = async () => {
+  // Video transcription can run for minutes, which is exactly why this returns
+  // straight away and lets the chip carry the progress.
+  const submitUrl = () => {
     const url = urlValue.trim()
     if (!url) return
-    setAttaching(true)
     setAttachError('')
-    try {
-      await onAttachUrl(url)
-      setUrlValue('')
-      setUrlOpen(false)
-    } catch (err) {
-      setAttachError(err instanceof Error ? err.message : 'Failed to add that link')
-    } finally {
-      setAttaching(false)
-    }
+    onAttachUrl(url)
+    setUrlValue('')
+    setUrlOpen(false)
   }
 
-  const handleFileInput = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileInput = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files
     // Reset immediately so picking the same file twice still fires onChange.
     event.target.value = ''
-    await attachFiles(files)
+    attachFiles(files)
   }
 
   const applyPreset = (preset: Exclude<StudyPreset, 'custom'>) => {
@@ -147,8 +143,11 @@ export function StudyBar({
   // The tutor and pretest both need a named subject server-side; the artifact
   // generators tolerate an empty one.
   const needsSubject = selected('tutor') || selected('pretest')
+  const waitingCount = pending.filter(p => p.status !== 'failed').length
   const blocker =
-    attachments.length === 0 ? 'Attach something to study first'
+    // A source still ingesting counts as material: submitting queues the run
+    // rather than being refused for having nothing attached.
+    attachments.length === 0 && waitingCount === 0 ? 'Attach something to study first'
       : formData.outputs.length === 0 ? 'Pick at least one thing to make'
       : needsSubject && !formData.subjectName ? 'Pick a subject — the pretest and tutor need one'
       : null
@@ -165,10 +164,10 @@ export function StudyBar({
       <div
         onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
         onDragLeave={() => setDragging(false)}
-        onDrop={async (e) => {
+        onDrop={(e) => {
           e.preventDefault()
           setDragging(false)
-          if (!loading && !attaching) await attachFiles(e.dataTransfer.files)
+          if (!loading) attachFiles(e.dataTransfer.files)
         }}
         className={`rounded-2xl border backdrop-blur-xl transition-colors ${
           dragging
@@ -176,8 +175,11 @@ export function StudyBar({
             : 'border-white/15 bg-white/[0.06] focus-within:border-[#D7FF3D]/40'
         }`}
       >
-        {/* Attached material */}
-        {attachments.length > 0 && (
+        {/* Attached material: settled attachments and still-ingesting sources
+            in one list, because to the student they are the same thing at
+            different stages. Progress belongs here, on the source it describes
+            — never on the submit button. */}
+        {(attachments.length > 0 || pending.length > 0) && (
           <div className="flex flex-wrap gap-2 p-3 pb-0">
             {attachments.map(item => (
               <span
@@ -197,6 +199,52 @@ export function StudyBar({
                 </button>
               </span>
             ))}
+
+            {pending.map(job => (
+              <span
+                key={job.tempId}
+                className={`inline-flex items-center gap-2 rounded-lg border pl-2.5 pr-1.5 py-1.5 ${
+                  job.status === 'failed'
+                    ? 'border-red-400/40 bg-red-400/[0.08]'
+                    : 'border-white/15 bg-white/[0.06]'
+                }`}
+              >
+                {job.status === 'failed'
+                  ? <AlertCircle className="h-3.5 w-3.5 shrink-0 text-red-300" />
+                  : <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-white/50" />}
+                <span className="flex flex-col min-w-0">
+                  <span className="text-sm text-white/80 truncate max-w-[14rem]">{job.label}</span>
+                  <span className={`text-xs truncate max-w-[14rem] ${
+                    job.status === 'failed' ? 'text-red-300' : 'text-white/40'
+                  }`}>
+                    {job.status === 'failed'
+                      ? (job.error || 'Could not be added')
+                      : job.status === 'queued'
+                        ? 'Queued'
+                        : (job.stage || 'Starting…')}
+                  </span>
+                </span>
+                {job.status === 'failed' && (
+                  <button
+                    type="button"
+                    onClick={() => ingestStore.retry(job.tempId)}
+                    className="text-xs text-white/60 hover:text-white transition-colors px-1"
+                  >
+                    Retry
+                  </button>
+                )}
+                {/* "Remove", not "Cancel": aborting the request detaches this
+                    tab, but the backend finishes the job either way. */}
+                <button
+                  type="button"
+                  onClick={() => ingestStore.remove(job.tempId)}
+                  aria-label={`Remove ${job.label}`}
+                  className="text-white/40 hover:text-white transition-colors"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </span>
+            ))}
           </div>
         )}
 
@@ -210,17 +258,17 @@ export function StudyBar({
                 if (e.key === 'Enter') { e.preventDefault(); submitUrl() }
                 if (e.key === 'Escape') { setUrlOpen(false); setUrlValue('') }
               }}
-              disabled={loading || attaching}
+              disabled={loading}
               autoFocus
               placeholder="Paste a YouTube video or article link…"
               className="flex-1 rounded-lg border border-white/15 bg-white/[0.06] px-3 py-2 text-sm text-white placeholder:text-white/35 outline-none focus:border-[#D7FF3D]/40 disabled:opacity-50"
             />
             <Button
               onClick={submitUrl}
-              disabled={loading || attaching || !urlValue.trim()}
+              disabled={loading || !urlValue.trim()}
               className={`${LIME_BG} text-black hover:bg-[#c2e836] shrink-0`}
             >
-              {attaching ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Add'}
+              Add
             </Button>
           </div>
         )}
@@ -228,7 +276,6 @@ export function StudyBar({
         <textarea
           value={formData.focusNote}
           onChange={(e) => setFormData(prev => ({ ...prev, focusNote: e.target.value }))}
-          disabled={loading}
           rows={2}
           placeholder={
             attachments.length === 0
@@ -244,14 +291,12 @@ export function StudyBar({
             <button
               type="button"
               onClick={() => fileRef.current?.click()}
-              disabled={loading || attaching}
+              disabled={loading}
               aria-label="Attach study material"
               title="Attach a file"
               className="p-2 rounded-lg text-white/50 hover:text-white hover:bg-white/10 transition-colors disabled:opacity-50"
             >
-              {attaching
-                ? <Loader2 className="h-[18px] w-[18px] animate-spin" />
-                : <Paperclip className="h-[18px] w-[18px]" />}
+              <Paperclip className="h-[18px] w-[18px]" />
             </button>
             <input
               ref={fileRef}
@@ -260,13 +305,13 @@ export function StudyBar({
               multiple
               onChange={handleFileInput}
               className="hidden"
-              disabled={loading || attaching}
+              disabled={loading}
             />
 
             <button
               type="button"
               onClick={() => setUrlOpen(o => !o)}
-              disabled={loading || attaching}
+              disabled={loading}
               aria-expanded={urlOpen}
               aria-label="Add a link"
               title="Add a YouTube video or article link"
@@ -280,7 +325,6 @@ export function StudyBar({
             <button
               type="button"
               onClick={() => setAdvancedOpen(o => !o)}
-              disabled={loading}
               aria-expanded={advancedOpen}
               className={`inline-flex items-center gap-1.5 px-2.5 py-2 rounded-lg text-sm transition-colors disabled:opacity-50 ${
                 advancedOpen ? 'text-white bg-white/10' : 'text-white/50 hover:text-white hover:bg-white/10'
@@ -292,16 +336,22 @@ export function StudyBar({
             </button>
           </div>
 
+          {/* Never gated on ingestion: clicking with sources still arriving
+              queues the run, which is the whole point. `progressStage` here
+              covers only the operations this button actually starts — tutor
+              and pretest — never an attachment's progress. */}
           <Button
             onClick={onStart}
-            disabled={loading || attaching || !!blocker}
+            disabled={loading || queuedSubmit || !!blocker}
             title={blocker ?? undefined}
             className={`${LIME_BG} text-black hover:bg-[#c2e836] shrink-0`}
           >
-            {loading ? (
+            {loading || queuedSubmit ? (
               <>
                 <div className="animate-spin h-4 w-4 mr-2 border-2 border-black/60 border-t-transparent rounded-full" />
-                {progressStage || 'Working…'}
+                {queuedSubmit
+                  ? `Waiting for ${waitingCount} source${waitingCount === 1 ? '' : 's'}…`
+                  : (progressStage || 'Working…')}
               </>
             ) : (
               <>
