@@ -1,8 +1,15 @@
+<p align="center">
+  <picture>
+    <source srcset="docs/assets/banner-ink.svg" type="image/svg+xml">
+    <img src="docs/assets/banner.png" alt="Bloom" width="100%">
+  </picture>
+</p>
+
 # Bloom
 
-Bloom is an AI-powered study platform that turns course material — uploaded files, pasted links, or YouTube videos — into summaries, flashcards, practice quizzes, two-speaker podcast episodes, adaptive one-on-one tutoring, and live voice roleplay sessions where the student explains the material out loud and is graded against a grounded rubric.
+Bloom is an AI-powered study platform that turns course material (uploaded files, pasted links, or YouTube videos) into summaries, flashcards, practice quizzes, two-speaker podcast episodes, adaptive one-on-one tutoring, and live voice roleplay sessions where the student explains the material out loud and is graded against a grounded rubric.
 
-It is built around an agentic backend: every generation step is a multi-stage pipeline with self-verification rather than a single LLM call. Every stage fails open — any verification step that errors out degrades gracefully instead of blocking the student.
+It is built around an agentic backend: every generation step is a multi-stage pipeline with self-verification rather than a single LLM call. Every stage fails open: any verification step that errors out degrades gracefully instead of blocking the student.
 
 ## Features
 
@@ -24,7 +31,7 @@ It is built around an agentic backend: every generation step is a multi-stage pi
 ### Tutoring
 
 - Adaptive tutor sessions with per-concept mastery tracking, variant/recheck follow-ups, and difficulty calibration
-- Selectable rigor modes — `vibe_check` (0.75 mastery bar) and `locked_in` (0.85, two variants, a hard variant, and a required final success)
+- Selectable rigor modes: `vibe_check` (0.75 mastery bar) and `locked_in` (0.85, two variants, a hard variant, and a required final success)
 - Teach-it-back mode: the tutor states a plausible misconception and the student has to correct it in their own words
 - Self-explanation prompts, confidence calibration feedback, and misconception diagnosis rather than plain right/wrong
 - Live voice roleplay: a grounded scene, real-time speech in and out over a WebSocket, and a rubric graded against the source at the end
@@ -87,7 +94,7 @@ flowchart TB
 
 ### Request lifecycle
 
-Long pipelines run 30+ seconds, so the frontend generates a progress id, sends it with the request, and polls `GET /progress/{id}` while the request is in flight. Pipelines report human-readable stage strings ("Describing page 4 of 12") as they go. Progress is in-memory and best-effort — losing it on restart just falls back to generic spinner text.
+Long pipelines run 30+ seconds, so the frontend generates a progress id, sends it with the request, and polls `GET /progress/{id}` while the request is in flight. Pipelines report human-readable stage strings ("Describing page 4 of 12") as they go. Progress is in-memory and best-effort; losing it on restart just falls back to generic spinner text.
 
 ```mermaid
 sequenceDiagram
@@ -133,7 +140,7 @@ flowchart TD
 
 ### URL ingestion
 
-A link produces the same plain-text-plus-filename shape a file upload does, so nothing downstream — chunking, embedding, overlap detection, the library, tutor sources — needs to know a document came from a link. YouTube is tiered: the caption track is tried first because it is instant and free, and Whisper transcription is the slow fallback. A caption track under 200 characters is treated as a miss rather than ingested as-is.
+A link produces the same plain-text-plus-filename shape a file upload does, so nothing downstream (chunking, embedding, overlap detection, the library, tutor sources) needs to know a document came from a link. YouTube is tiered: the caption track is tried first because it is instant and free, and Whisper transcription is the slow fallback. A caption track under 200 characters is treated as a miss rather than ingested as-is.
 
 ```mermaid
 flowchart TD
@@ -200,7 +207,7 @@ flowchart TD
 
 The script and the audio fail independently, on purpose. Writing and grounding the script is the expensive, valuable part; synthesis is a separate service that can be out of credit or misconfigured, so a synthesis failure still returns a full readable script with an `audio_error` the player shows.
 
-Deepgram has no multi-speaker mode, so assembly is owned here. Segments are requested as raw linear16 PCM at 24 kHz and concatenated as samples, with a single MP3 encode at the end — encoding per segment would put MP3 frame boundaries mid-episode, which is exactly where audible seams come from. Per-segment sample counts give exact playback offsets rather than word-count estimates.
+Deepgram has no multi-speaker mode, so assembly is owned here. Segments are requested as raw linear16 PCM at 24 kHz and concatenated as samples, with a single MP3 encode at the end. Encoding per segment would put MP3 frame boundaries mid-episode, which is exactly where audible seams come from. Per-segment sample counts give exact playback offsets rather than word-count estimates.
 
 ```mermaid
 flowchart TD
@@ -239,13 +246,13 @@ flowchart LR
 
 ### Adaptive tutor
 
-A tutor session extracts key concepts, initializes a per-concept mastery estimate, and makes a fresh decision after every answer. The central rule is that **one correct answer is never mastery evidence on its own** — multiple choice has a 25% guess rate, and repeating a question tests memory of the question, not the concept. So every answer schedules a follow-up in a different framing, landing 2–4 questions later, unannounced:
+A tutor session extracts key concepts, initializes a per-concept mastery estimate, and makes a fresh decision after every answer. The central rule is that **one correct answer is never mastery evidence on its own**: multiple choice has a 25% guess rate, and repeating a question tests memory of the question, not the concept. So every answer schedules a follow-up in a different framing, landing 2-4 questions later, unannounced:
 
 - A **correct** answer queues a *variant* of the same knowledge point. Passing variants is what actually moves a concept toward mastered.
-- A **wrong** answer shows the correct answer plus a diagnosis and queues a *recheck*. Failing rechecks three times parks the concept — the tutor stops drilling it and the summary says to re-read that material.
+- A **wrong** answer shows the correct answer plus a diagnosis and queues a *recheck*. Failing rechecks three times parks the concept: the tutor stops drilling it and the summary says to re-read that material.
 - Failing a variant after getting the original right is memorization-detected, and is punished harder than a plain miss.
 
-Mastery deltas combine a difficulty base, an evidence-quality weight, and the student's self-reported confidence. A confidently-wrong answer moves further than an unsure one; an unsure-but-right answer moves less, since it may be a lucky guess. No live knowledge state is exposed during the session — only the end summary.
+Mastery deltas combine a difficulty base, an evidence-quality weight, and the student's self-reported confidence. A confidently-wrong answer moves further than an unsure one; an unsure-but-right answer moves less, since it may be a lucky guess. No live knowledge state is exposed during the session, only in the end summary.
 
 | Mode | Mastery bar | Variants required | Hard variant | Last answer must be correct |
 |---|---|---|---|---|
@@ -291,13 +298,13 @@ sequenceDiagram
 
 The student practices explaining their material out loud to a character who has a reason to ask about it, and a grounded rubric grades the transcript at the end. The scene is the delivery mechanism; the rubric is the feature.
 
-Roleplay runs parallel to the tutor agent and deliberately shares none of its state machine — a tutor session is a question/answer loop with mastery gates, a roleplay session is a conversation with one terminal grading pass. The structural difference is a **persisted/live split**: a session holds a websocket, an upstream Deepgram Flux socket, and an in-flight TTS task, none of which are serializable and all of which are meaningless after a disconnect. Those live under `session["live"]`, so the persistence layer never has to know they exist and a reconnect rebuilds them without touching `session["persisted"]`.
+Roleplay runs parallel to the tutor agent and deliberately shares none of its state machine: a tutor session is a question/answer loop with mastery gates, while a roleplay session is a conversation with one terminal grading pass. The structural difference is a **persisted/live split**: a session holds a websocket, an upstream Deepgram Flux socket, and an in-flight TTS task, none of which are serializable and all of which are meaningless after a disconnect. Those live under `session["live"]`, so the persistence layer never has to know they exist and a reconnect rebuilds them without touching `session["persisted"]`.
 
 Four rules carry the feature:
 
-1. **The rubric's `evidence` is never sent to the client.** Criterion *names* are shown up front — knowing what a good explanation covers is the pedagogy — but `evidence` names the source fact that makes each one checkable, which is the answer key.
+1. **The rubric's `evidence` is never sent to the client.** Criterion *names* are shown up front, because knowing what a good explanation covers is the pedagogy, but `evidence` names the source fact that makes each one checkable, which is the answer key.
 2. **Grading is fail-silent, not fail-generous.** An ungradeable scene returns null score, empty criteria, and an honest message. Marking every criterion met would tell a student they demonstrated things they never said.
-3. **Ownership is checked twice** — in SQL on the cold path, and explicitly on a cache hit where no query ran at all.
+3. **Ownership is checked twice**: in SQL on the cold path, and explicitly on a cache hit where no query ran at all.
 4. **Mastery moves weakly.** A criterion graded by a model reading a conversation is softer evidence than an answer key, so a scene nudges mastery by a fraction of a graded question, and never schedules a spaced-repetition review.
 
 Scenes are capped at 20 turns with a soft checkpoint nudge at 12, and a scene with fewer than two student turns isn't graded at all.
@@ -311,7 +318,7 @@ sequenceDiagram
     participant LLM
     participant TTS as Deepgram Aura-2
 
-    Note over B,WS: Auth is a first-frame protocol, not a query param —<br/>a token in the URL lands in access logs and history
+    Note over B,WS: Auth is a first-frame protocol, not a query param:<br/>a token in the URL lands in access logs and history
 
     B->>WS: {"type":"auth","token":...}
     WS->>RP: Load session, check ownership
@@ -350,7 +357,7 @@ sequenceDiagram
 
 ### Spaced repetition
 
-Flashcards and concepts both carry SM-2 scheduling state — `(interval_days, ease, repetitions)` with an ease floor of 1.3. Flashcard reviews are graded by the student's self-report; concept reviews are scheduled by the tutor when a session confirms or fails a concept against its mastery bar. Due items surface through `/me/flashcards/due` and `/me/concepts/due`.
+Flashcards and concepts both carry SM-2 scheduling state: `(interval_days, ease, repetitions)` with an ease floor of 1.3. Flashcard reviews are graded by the student's self-report; concept reviews are scheduled by the tutor when a session confirms or fails a concept against its mastery bar. Due items surface through `/me/flashcards/due` and `/me/concepts/due`.
 
 ```mermaid
 flowchart LR
@@ -387,17 +394,17 @@ erDiagram
 
 Key columns worth knowing:
 
-- `documents.source_key` / `source_content_type` — the object-storage key for the original upload
-- `document_chunks.embedding` — 384-dim `VECTOR`, indexed separately in `002_vector_indexes.sql`
-- `concept_mastery` — mastery estimate plus `interval_days` / `ease` / `review_due_at` for concept-level spaced repetition
-- `tutor_sessions` — six `jsonb` columns holding the full knowledge state, so a session survives a backend restart; roleplay adds scenario, transcript, and rubric columns to the same table
-- `flashcards.due_at` — indexed with `user_id` for the due-card query
+- `documents.source_key` / `source_content_type`: the object-storage key for the original upload
+- `document_chunks.embedding`: 384-dim `VECTOR`, indexed separately in `002_vector_indexes.sql`
+- `concept_mastery`: mastery estimate plus `interval_days` / `ease` / `review_due_at` for concept-level spaced repetition
+- `tutor_sessions`: six `jsonb` columns holding the full knowledge state, so a session survives a backend restart; roleplay adds scenario, transcript, and rubric columns to the same table
+- `flashcards.due_at`: indexed with `user_id` for the due-card query
 
 ### Database layer
 
 The port off Supabase's client to CockroachDB is documented in `MIGRATION_COCKROACHDB.md`. Three choices shape `database.py`:
 
-- **psycopg 3, synchronous.** Every `db.py` function is sync and callers already wrap blocking work in `asyncio.to_thread`. Going async would mean rewriting every signature and every caller — a whole-app refactor rather than a port.
+- **psycopg 3, synchronous.** Every `db.py` function is sync and callers already wrap blocking work in `asyncio.to_thread`. Going async would mean rewriting every signature and every caller: a whole-app refactor rather than a port.
 - **`row_factory=dict_row`**, which makes every query return `list[dict]` with string keys, exactly what `supabase-py`'s `.execute().data` returned. This is the single choice that kept consumers working untouched.
 - **Client-side retry on SQLSTATE 40001.** CockroachDB uses `SERIALIZABLE` isolation and aborts conflicting transactions rather than blocking, so retry with exponential backoff and jitter is a requirement of the database, not defensive padding.
 
@@ -408,7 +415,7 @@ One CockroachDB-specific wrinkle: pgvector's *input* adapter doesn't bind, becau
 ### Backend
 
 - FastAPI with Uvicorn; one WebSocket route for live roleplay
-- OpenRouter as the LLM provider — `openai/gpt-oss-120b` for text, `google/gemma-4-31b-it` for vision page descriptions
+- OpenRouter as the LLM provider: `openai/gpt-oss-120b` for text, `google/gemma-4-31b-it` for vision page descriptions
 - CockroachDB via psycopg 3 with a connection pool, for all persistence and vector search
 - Supabase Auth for identity only
 - Deepgram Aura-2 for TTS (podcasts and roleplay), Deepgram Flux (`v2/listen`) for streaming STT
@@ -455,16 +462,16 @@ DATABASE_URL=postgresql://user:pass@host:26257/bloom?sslmode=verify-full
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
 
-# Optional — audio features. Without this, podcasts are script-only
+# Optional, audio features. Without this, podcasts are script-only
 # and voice roleplay falls back to text.
 DEEPGRAM_API_KEY=your_deepgram_key
 
-# Optional — object storage. Without a bucket, originals and podcast
+# Optional, object storage. Without a bucket, originals and podcast
 # audio are written to backend/media/ under the same key layout.
 AWS_S3_BUCKET=your-bucket
 AWS_REGION=us-west-2
 
-# Optional — tuning
+# Optional, tuning
 DB_POOL_MAX_SIZE=10
 WHISPER_MODEL=base
 PUBLIC_API_URL=http://localhost:8000
@@ -475,7 +482,7 @@ Apply the SQL in `backend/sql/cockroach/` in numeric order:
 | File | Adds |
 |---|---|
 | `001_schema.sql` | Every table, index, and UDF (collapsed final state) |
-| `002_vector_indexes.sql` | The two vector indexes — separate so a bulk load can precede them |
+| `002_vector_indexes.sql` | The two vector indexes, kept separate so a bulk load can precede them |
 | `003_podcasts.sql` | Podcast episodes and segment offsets |
 | `004_document_originals.sql` | `documents.source_key` / `source_content_type` |
 | `005_roleplay.sql` | Roleplay state columns on `tutor_sessions` |
