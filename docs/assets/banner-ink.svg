@@ -6,11 +6,11 @@
     </filter>
     <mask id="reveal">
       <rect width="1536" height="614" fill="black"/>
-      <circle cx="768" cy="307" r="0" fill="white" filter="url(#ink)">
-        <animate attributeName="r" values="140;140;1100"
-                 keyTimes="0;0.0909;1"
-                 dur="11s" fill="freeze"
-                 calcMode="spline" keySplines="0 0 1 1; 0.22 0.61 0.36 1"/>
+      <circle cx="768" cy="307" r="140" fill="white" filter="url(#ink)">
+        <animate attributeName="r" values="140;1100"
+                
+                 dur="2.2s" fill="freeze"
+                 calcMode="spline" keySplines="0.22 0.61 0.36 1"/>
       </circle>
     </mask>
   </defs>
