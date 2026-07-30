@@ -189,14 +189,17 @@ async def _synthesize_one(
     params = {
         "model": voice,
         "encoding": encoding,
-        # For the podcast path, no container: a WAV header per segment would
-        # land in the middle of the joined stream and be decoded as noise.
-        "container": container,
     }
-    # sample_rate is meaningful for raw PCM; MP3 carries its own rate in the
-    # bitstream, and sending both is how you get a 422.
+    # sample_rate and container are both meaningful only for raw PCM. MP3
+    # carries its own rate in the bitstream, and Deepgram rejects the request
+    # outright with UNSUPPORTED_AUDIO_FORMAT if `container` is sent alongside
+    # `encoding=mp3` — so for the roleplay path both are omitted rather than
+    # defaulted.
     if encoding == "linear16":
         params["sample_rate"] = str(SAMPLE_RATE)
+        # For the podcast path, no container: a WAV header per segment would
+        # land in the middle of the joined stream and be decoded as noise.
+        params["container"] = container
     headers = {
         "Authorization": f"Token {api_key}",
         "Content-Type": "application/json",

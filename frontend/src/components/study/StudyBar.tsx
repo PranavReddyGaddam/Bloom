@@ -96,10 +96,12 @@ export function StudyBar({
   // concurrency limiter, so this hands them all over at once rather than
   // awaiting each in turn. The only error caught here is the synchronous
   // file-type rejection — everything after that lands on the file's chip.
-  const attachFiles = (files: FileList | null) => {
-    if (!files || files.length === 0) return
+  const attachFiles = (files: FileList | Iterable<File> | null) => {
+    if (!files) return
+    const list = Array.from(files)
+    if (list.length === 0) return
     setAttachError('')
-    for (const file of Array.from(files)) {
+    for (const file of list) {
       try {
         onAttachFile(file)
       } catch (err) {
@@ -121,7 +123,10 @@ export function StudyBar({
   }
 
   const handleFileInput = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files
+    // Snapshot before resetting: clearing event.target.value also empties
+    // the live FileList event.target.files points to, so the reset must
+    // come after the files are captured, not before.
+    const files = event.target.files ? Array.from(event.target.files) : []
     // Reset immediately so picking the same file twice still fires onChange.
     event.target.value = ''
     attachFiles(files)
@@ -140,16 +145,19 @@ export function StudyBar({
     })
   }
 
-  // The tutor and pretest both need a named subject server-side; the artifact
-  // generators tolerate an empty one.
-  const needsSubject = selected('tutor') || selected('pretest')
+  // Summary is the only output whose subject is optional server-side
+  // (Form(None)); quiz, flashcards, podcast, tutor, and pretest all require
+  // one (Form(...)) and 422 without it.
+  const needsSubject =
+    selected('tutor') || selected('pretest') || selected('quiz') ||
+    selected('flashcards') || selected('podcast')
   const waitingCount = pending.filter(p => p.status !== 'failed').length
   const blocker =
     // A source still ingesting counts as material: submitting queues the run
     // rather than being refused for having nothing attached.
     attachments.length === 0 && waitingCount === 0 ? 'Attach something to study first'
       : formData.outputs.length === 0 ? 'Pick at least one thing to make'
-      : needsSubject && !formData.subjectName ? 'Pick a subject — the pretest and tutor need one'
+      : needsSubject && !formData.subjectName ? 'Pick a subject for this material'
       : null
 
   const ctaLabel = selected('pretest')

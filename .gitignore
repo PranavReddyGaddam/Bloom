@@ -126,3 +126,6 @@ ROADMAP*.md
 **/.mcp.json
 
 .codex/
+
+demo_voiceover.py
+docs/demo-script.md

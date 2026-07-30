@@ -415,7 +415,7 @@ One CockroachDB-specific wrinkle: pgvector's *input* adapter doesn't bind, becau
 ### Backend
 
 - FastAPI with Uvicorn; one WebSocket route for live roleplay
-- OpenRouter as the LLM provider: `openai/gpt-oss-120b` for text, `google/gemma-4-31b-it` for vision page descriptions
+- OpenRouter as the LLM provider: `openai/gpt-oss-120b` for text, load-balanced across Cerebras, Groq, and Amazon Bedrock (a single pinned provider rate-limits under concurrent bursts); `google/gemma-4-31b-it` for vision page descriptions, left unpinned for the same reason
 - CockroachDB via psycopg 3 with a connection pool, for all persistence and vector search
 - Supabase Auth for identity only
 - Deepgram Aura-2 for TTS (podcasts and roleplay), Deepgram Flux (`v2/listen`) for streaming STT

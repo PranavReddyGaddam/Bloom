@@ -54,8 +54,14 @@ class BloomAI:
         """Make a request to the OpenRouter API"""
         data = {
             "model": "openai/gpt-oss-120b",
+            # Load-balanced across three providers rather than pinned to one:
+            # a single-provider pin rate-limits under concurrent bursts (see
+            # describe_page_image below, which hit the same problem first).
+            # Cerebras is fastest/cheapest when available; Groq and Bedrock
+            # give OpenRouter somewhere else to route when it's not.
             "provider": {
-                "only": ["Cerebras"]
+                "order": ["Cerebras", "Groq", "amazon-bedrock"],
+                "allow_fallbacks": True
             },
             "messages": messages
         }
